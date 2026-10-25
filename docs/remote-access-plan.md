@@ -1125,7 +1125,10 @@ the other panes. The pane follows `HostStatus` live; nothing polls.
     - "203.0.113.9" with **Copy**;
     - orange: "Your internet provider shares this address among many homes (100.72.x.x), so a port
       forward can’t reach this Mac. Use a VPN such as Tailscale instead.";
-    - orange: "Your router sits behind another router. Forward the port on both, or use a VPN.";
+    - orange: "Your router sits behind another router, so Sill can’t learn your internet address for
+      your devices. Forward the port on both routers and enter an address name below, or use a
+      VPN." (both orange lines under the row's title, leading, since 2026-10-25: as the row's value
+      they wrapped right-aligned);
     - "Your router didn’t say. You’ll find the address in its settings."
   - **"Address name (optional)"**, a field with placeholder "home.example.net". It accepts `host` or
     `host:port` and is checked by the address parser. Footer: "If your router has a dynamic DNS name,

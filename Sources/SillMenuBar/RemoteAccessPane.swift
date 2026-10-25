@@ -268,18 +268,24 @@ struct RemoteAccessPane: View {
                 }
             }
         case .carrierNAT(let a):
-            LabeledContent("Router’s internet address") {
-                Warning("Your internet provider shares this address among many homes (\(Self.masked(a))), so a port forward can’t reach this Mac. Use a VPN such as Tailscale instead.")
-            }
+            routerWarning("Your internet provider shares this address among many homes (\(Self.masked(a))), so a port forward can’t reach this Mac. Use a VPN such as Tailscale instead.")
         case .doubleNAT:
-            LabeledContent("Router’s internet address") {
-                Warning("Your router sits behind another router. Forward the port on both, or use a VPN.")
-            }
+            routerWarning("Your router sits behind another router, so Sill can’t learn your internet address for your devices. Forward the port on both routers and enter an address name below, or use a VPN.")
         case .noAnswer:
             LabeledContent("Router’s internet address") {
                 Text("Your router didn’t say. You’ll find the address in its settings.").foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// A warning in place of the router's address, under the row's title and leading as a sentence
+    /// reads: as LabeledContent's value it wrapped right-aligned.
+    private func routerWarning(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Router’s internet address")
+            Warning(text)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder private var addressNameRow: some View {

@@ -723,8 +723,10 @@ The ways in:
   internet, off by default): forward TCP 7455 on the router to the Mac's
   address shown there, and reserve that address for the Mac. The pane shows
   the router's internet address when the router says it, or explains when your
-  provider shares one address among many customers (CGNAT) or there are two
-  routers in a row (double NAT); then a port forward cannot work and a VPN can.
+  provider shares one address among many customers (CGNAT: a port forward
+  cannot work, a VPN can) or there are two routers in a row (double NAT: forward
+  the port on both, and give an address name, since the Mac cannot learn the
+  internet address and devices get none without it).
   If your internet address changes, add a dynamic DNS name as the address name.
   Turning the switch off disconnects devices that came in from the internet.
 
