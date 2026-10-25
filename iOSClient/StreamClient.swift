@@ -310,7 +310,13 @@ final class StreamClient: ObservableObject {
 
     /// Pixel size of the frames the host is sending, from the HEVC parameter sets. Input positions
     /// are fractions of this, so the overlay needs it to letterbox touches the way the layer does.
-    @Published var videoSize: CGSize = .zero
+    /// Another size is another picture (a new source, an Aa resize): it starts whole.
+    @Published var videoSize: CGSize = .zero {
+        didSet { if videoSize != oldValue { pictureZoom.reset(animated: false) } }
+    }
+    /// The picture's own zoom on this device (a pinch on the stream): the overlay changes it, the
+    /// display view draws it. Main thread.
+    let pictureZoom = PictureZoom()
     // The pointer sprite (docs/pointer-visibility-plan.md §7.3; the rules are PointerPresence.swift's).
     // One sprite in the display view shows the Mac's pointer while the Mac, or another device, moved it
     // last (kind 26 says where), and this device's own only for the portrait trackpad (and the Pencil,

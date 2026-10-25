@@ -463,7 +463,8 @@ struct PortraitStreamScreen: View {
                          isKeyboardShown: $keyboardShown,
                          latchedModifiers: latched,
                          onModifiersConsumed: { latched = [] },
-                         sendGesture: { client.sendGesture($0, fingers: $1) })
+                         sendGesture: { client.sendGesture($0, fingers: $1) },
+                         zoom: client.pictureZoom)
         }
         .background(Palette.panel)
         .overlay(alignment: .top) { LinkLineView(text: linkLine) }

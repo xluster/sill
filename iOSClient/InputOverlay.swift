@@ -75,6 +75,17 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// The Pencil's hover and the iPad's pointer, which the pointer's scrolls recognize alongside.
     private weak var hover: UIHoverGestureRecognizer?
 
+    /// The picture's own zoom (`PictureZoom`), which the display view draws with the same bounds;
+    /// nil leaves the picture whole and pinches unanswered.
+    var zoom: PictureZoom?
+    /// Two fingers pinching, which magnify the picture here and send the Mac nothing.
+    private weak var pinch: UIPinchGestureRecognizer?
+    /// From a pinch's start, or two fingers' pan over a magnified picture, until both recognizers are
+    /// done: the finger pan moves the picture instead of scrolling the Mac (`handlePan`).
+    private var zoomStroke = false
+    /// The finger pan's translation already turned into the picture's move.
+    private var lastPicturePan: CGPoint = .zero
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
@@ -109,6 +120,20 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         pan.allowedTouchTypes = directOnly
         pan.delegate = self
         addGestureRecognizer(pan)
+
+        // Two fingers pinching magnify the picture on this device (`PictureZoom`), alongside the pan,
+        // which then moves the magnified picture instead of scrolling. A two-finger double tap goes
+        // back to the whole picture, or magnifies it where it lands; a finger's tap never waits for it.
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
+        pinch.allowedTouchTypes = directOnly
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+        self.pinch = pinch
+        let zoomTap = UITapGestureRecognizer(target: self, action: #selector(handleZoomTap))
+        zoomTap.numberOfTouchesRequired = 2
+        zoomTap.numberOfTapsRequired = 2
+        zoomTap.allowedTouchTypes = directOnly
+        addGestureRecognizer(zoomTap)
 
         // Pencil hover on the iPads that support it, and the trackpad/mouse pointer everywhere.
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover))
@@ -145,8 +170,15 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     // MARK: - Coordinates
 
-    /// Where the layer actually draws the video inside this view.
-    private var videoRect: CGRect { HEVCDisplayView.videoRect(in: bounds, videoSize: videoSize) }
+    /// Where the layer actually draws the video inside this view: the letterboxed rect, magnified and
+    /// moved by the zoom, so a touch on the magnified picture lands on what it shows.
+    private var videoRect: CGRect {
+        let rect = wholeVideoRect
+        return zoom?.zoomed(rect, in: bounds) ?? rect
+    }
+
+    /// The letterboxed rect before the zoom, which `PictureZoom` measures its moves against.
+    private var wholeVideoRect: CGRect { HEVCDisplayView.videoRect(in: bounds, videoSize: videoSize) }
 
     /// A point in this view as a fraction of the video frame. Points in the letterbox are clamped to
     /// the video's edge when `clamped` (moves and drags should keep working past the edge) and
@@ -207,6 +239,13 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// positive dy).
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
         guard !strokes.silent else { return }
+        if gesture.state == .began {
+            // Two fingers over a magnified picture move it; one finger still scrolls the Mac.
+            if gesture.numberOfTouches >= 2, zoom?.isZoomed == true { beginZoomStroke() }
+            // Its first change carries the travel before it began, so the picture catches up.
+            if zoomStroke { lastPicturePan = .zero }
+        }
+        if zoomStroke { panPicture(gesture); return }
         scroll(gesture, .finger)
     }
 
@@ -304,12 +343,15 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     /// The pointer's scrolls and its hover run together: the pointer rests over the picture while two
-    /// fingers scroll.
+    /// fingers scroll. The pinch and the finger pan run together too: the pan moves what the pinch
+    /// magnifies.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         let scrolls = [trackpadScroll, wheelScroll].compactMap { $0 }
         return (scrolls.contains { $0 === gestureRecognizer } && other === hover)
             || (scrolls.contains { $0 === other } && gestureRecognizer === hover)
+            || (gestureRecognizer === pinch && other === scrollPan)
+            || (gestureRecognizer === scrollPan && other === pinch)
     }
 
     /// A stroke just went silent (TrackpadGestures: three fingers down): a scroll it had begun (a first
@@ -321,6 +363,78 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         scrollGestureOpen = false
         let p = scrollPan.flatMap { normalized($0.location(in: self), clamped: true) } ?? (x: 0.5, y: 0.5)
         send(.scrollGesture(.ended, x: p.x, y: p.y))
+    }
+
+    // MARK: - The picture's own zoom
+
+    /// Two fingers pinching: the picture grows or shrinks on this device about the point between
+    /// them (`PictureZoom`), from whole to `PictureZoom.maxScale`; the Mac is told nothing. Below
+    /// `snapScale` at the lift, it springs back whole.
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            guard let zoom, !strokes.silent else { return }
+            let whole = wholeVideoRect
+            guard whole.width > 0, whole.height > 0 else { return }
+            if gesture.state == .began { beginZoomStroke() }
+            zoom.pinch(by: gesture.scale, at: gesture.location(in: self), in: bounds, video: whole)
+            gesture.scale = 1
+        case .ended, .cancelled:
+            let whole = wholeVideoRect
+            if whole.width > 0, whole.height > 0 { zoom?.settle(in: bounds, video: whole) }
+            endZoomStrokeIfIdle()
+        default:
+            break
+        }
+    }
+
+    /// A two-finger double tap: back to the whole picture, or magnified where it landed.
+    @objc private func handleZoomTap(_ gesture: UITapGestureRecognizer) {
+        guard let zoom, !strokes.silent else { return }
+        let whole = wholeVideoRect
+        guard whole.width > 0, whole.height > 0 else { return }
+        zoom.toggle(at: gesture.location(in: self), in: bounds, video: whole)
+    }
+
+    /// Two fingers have become the picture's: a scroll the finger pan had begun ends here with no
+    /// coast (the Mac keeps what it got, as with a stroke's silence), and the pan's travel from now
+    /// on moves the picture.
+    private func beginZoomStroke() {
+        guard !zoomStroke else { return }
+        zoomStroke = true
+        momentum.stop()
+        let panning = scrollPan.map { $0.state == .began || $0.state == .changed } ?? false
+        lastPicturePan = panning ? scrollPan?.translation(in: self) ?? .zero : .zero
+        guard panning, scrollGestureOpen else { return }
+        lastPanTranslation = .zero
+        scrollGestureOpen = false
+        let p = scrollPan.flatMap { normalized($0.location(in: self), clamped: true) } ?? (x: 0.5, y: 0.5)
+        send(.scrollGesture(.ended, x: p.x, y: p.y))
+    }
+
+    /// The finger pan in a zoom stroke: the magnified picture follows the fingers.
+    private func panPicture(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            let t = gesture.translation(in: self)
+            let delta = CGPoint(x: t.x - lastPicturePan.x, y: t.y - lastPicturePan.y)
+            lastPicturePan = t
+            let whole = wholeVideoRect
+            guard whole.width > 0, whole.height > 0 else { return }
+            zoom?.pan(by: delta, in: bounds, video: whole)
+        default:
+            lastPicturePan = .zero
+            endZoomStrokeIfIdle()
+        }
+    }
+
+    /// The zoom stroke ends once neither the pinch nor the finger pan is still going, so a finger
+    /// left down after the other lifted keeps moving the picture rather than scrolling the Mac.
+    private func endZoomStrokeIfIdle() {
+        let going = { (r: UIGestureRecognizer?) in r?.state == .began || r?.state == .changed }
+        guard !going(scrollPan), !going(pinch) else { return }
+        zoomStroke = false
+        lastPicturePan = .zero
     }
 
     /// The coast after a flick, at the point the finger lifted. Steps are converted to fractions
@@ -366,6 +480,34 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let rect = videoRect
         guard rect.width > 0, rect.height > 0 else { return }
         tap(at: CGPoint(x: rect.minX + x * rect.width, y: rect.minY + y * rect.height))
+    }
+
+    /// `touch X,Y`: a finger's tap at that fraction of this view, not of the frame, so where it lands
+    /// on the Mac goes through the zoom as a real finger's does. Prints the frame fraction it lands on.
+    func scriptTouch(x: Double, y: Double) {
+        let point = CGPoint(x: bounds.minX + x * bounds.width, y: bounds.minY + y * bounds.height)
+        if let p = normalized(point, clamped: false) {
+            print(String(format: "input script: touch lands on the frame at %.4f,%.4f", p.x, p.y))
+        } else {
+            print("input script: touch lands outside the picture (view \(bounds.size), video \(videoSize))")
+        }
+        tap(at: point)
+    }
+
+    /// `zoom S X,Y`: two fingers pinching to S× about that fraction of this view, in the steps the
+    /// pinch's own path takes; `zoom 1` goes back to the whole picture. Prints the frame fraction now
+    /// under the view's centre, which a `touch 0.5,0.5` should click.
+    func scriptZoom(_ scale: Double, x: Double, y: Double) {
+        guard let zoom else { return }
+        let whole = wholeVideoRect
+        guard whole.width > 0, whole.height > 0 else { return }
+        if scale <= 1 { zoom.reset(animated: true); return }
+        let focus = CGPoint(x: bounds.minX + x * bounds.width, y: bounds.minY + y * bounds.height)
+        let step = pow(CGFloat(scale) / zoom.scale, 0.2)
+        for _ in 0..<5 { zoom.pinch(by: step, at: focus, in: bounds, video: whole) }
+        let rect = videoRect
+        print(String(format: "input script: zoom %.2f×, the view's centre shows the frame at %.4f,%.4f", zoom.scale,
+                     (bounds.midX - rect.minX) / rect.width, (bounds.midY - rect.minY) / rect.height))
     }
 
     /// `key USAGE`: a hardware key, down and up with no modifier, as `pressesBegan` and
@@ -950,6 +1092,8 @@ struct InputOverlay: UIViewRepresentable {
     var onModifiersConsumed: () -> Void = {}
     /// `StreamClient.sendGesture`; see `InputOverlayView.sendGesture`.
     var sendGesture: (TrackpadGestures.Gesture, Int) -> Bool = { _, _ in false }
+    /// `StreamClient.pictureZoom`; see `InputOverlayView.zoom`.
+    var zoom: PictureZoom? = nil
 
     func makeUIView(context: Context) -> InputOverlayView {
         let view = InputOverlayView(frame: .zero)
@@ -964,6 +1108,7 @@ struct InputOverlay: UIViewRepresentable {
         uiView.setOwnPointer = setOwnPointer
         uiView.latchedModifiers = latchedModifiers
         uiView.sendGesture = sendGesture
+        uiView.zoom = zoom
         // Called straight from a UIKit text-input callback, never from inside a SwiftUI update,
         // so writing the binding here needs no hop.
         uiView.onModifiersConsumed = onModifiersConsumed

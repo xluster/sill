@@ -633,6 +633,10 @@ struct LayoutHarness: View {
 /// * `lift` — it comes up;
 /// * `click` — a tap on the pad: a click where its cursor is;
 /// * `tap X,Y` — a finger's tap on the stream at that fraction of the frame;
+/// * `touch X,Y` — a finger's tap on the stream at that fraction of the stream's pane, through the
+///   picture's zoom as a real finger's;
+/// * `zoom S X,Y` — two fingers pinching the picture to S× about that fraction of the pane (`zoom 1`:
+///   whole again); the console says which frame fraction the pane's centre then shows;
 /// * `key USAGE` — a hardware key (a HID usage), down and up: this device's pointer hides;
 /// * `row USAGE` — a key of the portrait key row: what the sprite shows stays;
 /// * `gesture NAME[,FINGERS]` — a three-finger (or four-finger) gesture a surface decided, through
@@ -660,6 +664,7 @@ struct LayoutHarness: View {
 enum InputScript {
     enum Step: Equatable, CustomStringConvertible {
         case down, pad(dx: Double, dy: Double), lift, click, tap(x: Double, y: Double), key(UInt16), row(UInt16)
+        case touch(x: Double, y: Double), zoom(Double, x: Double, y: Double)
         case gesture(TrackpadGestures.Gesture, fingers: Int)
         case esc(modifiers: String), scroll(dx: Double, dy: Double), wheel(dx: Double, dy: Double)
         case keyboard(attached: Bool), orient(String)
@@ -671,6 +676,8 @@ enum InputScript {
             case .lift: return "lift"
             case .click: return "click"
             case .tap(let x, let y): return "tap \(x),\(y)"
+            case .touch(let x, let y): return "touch \(x),\(y)"
+            case .zoom(let s, let x, let y): return s <= 1 ? "zoom 1" : "zoom \(s) \(x),\(y)"
             case .key(let usage): return "key \(usage)"
             case .row(let usage): return "row \(usage)"
             case .gesture(let g, let fingers): return "gesture \(g.rawValue)" + (fingers == 3 ? "" : ",\(fingers)")
@@ -718,6 +725,12 @@ enum InputScript {
             case ("click", 2): step = .click
             case ("pad", 3) where pair.count == 2: step = .pad(dx: pair[0], dy: pair[1])
             case ("tap", 3) where pair.count == 2: step = .tap(x: pair[0], y: pair[1])
+            case ("touch", 3) where pair.count == 2: step = .touch(x: pair[0], y: pair[1])
+            case ("zoom", 3) where Double(words[2]) == 1: step = .zoom(1, x: 0.5, y: 0.5)
+            case ("zoom", 4):
+                let at = words[3].split(separator: ",").compactMap { Double($0) }
+                guard let s = Double(words[2]), s.isFinite, s >= 1, at.count == 2 else { return nil }
+                step = .zoom(s, x: at[0], y: at[1])
             case ("key", 3): guard let usage = UInt16(words[2]) else { return nil }; step = .key(usage)
             case ("row", 3): guard let usage = UInt16(words[2]) else { return nil }; step = .row(usage)
             case ("gesture", 3):
@@ -796,6 +809,8 @@ enum InputScript {
         case .lift: if let pad { pad.scriptLift() } else { done = false }
         case .click: if let pad { pad.scriptClick() } else { done = false }
         case .tap(let x, let y): if let overlay { overlay.scriptTap(x: x, y: y) } else { done = false }
+        case .touch(let x, let y): if let overlay { overlay.scriptTouch(x: x, y: y) } else { done = false }
+        case .zoom(let s, let x, let y): if let overlay { overlay.scriptZoom(s, x: x, y: y) } else { done = false }
         case .key(let usage): if let overlay { overlay.scriptKey(usage) } else { done = false }
         case .row(let usage):
             client.sendFromKeyRow(.key(hidUsage: usage, down: true, modifiers: 0))
