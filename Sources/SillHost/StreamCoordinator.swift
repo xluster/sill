@@ -271,6 +271,18 @@ package final class StreamCoordinator {
     private var menuFrontCheckPending = false
     /// Under the AppKit loop, while a device subscribes: app activations on the Mac.
     private var frontmostObserver: NSObjectProtocol?
+    /// The display kept on while a device is connected, and woken before a capture (DisplayWake).
+    /// Never on a synthetic host: the test pattern is not the screen.
+    private let displayWake = DisplayWake()
+    /// The source whose capture the display's sleep stopped while a device watched: restarted
+    /// once the display is on again (`captureStopped`, `resumeAfterDisplaySleep`). Cleared by a
+    /// device's pick and by the last device leaving.
+    private var lostToDisplaySleep: StreamSource?
+    /// When `captureStopped` last woke the display to restart a source: once per 10 s at most, so
+    /// a display that will not stay on cannot loop.
+    private var lastSleepRestart: CFAbsoluteTime = 0
+    /// Under the AppKit loop: the display coming back, which restarts `lostToDisplaySleep`.
+    private var screensWokeObserver: NSObjectProtocol?
 
     /// `config` is validated, and its virtual display forced off without the AppKit loop, which
     /// the display needs (VirtualDisplay.swift, "Event loop"). `appKitLoop`: see the property.
@@ -424,6 +436,10 @@ package final class StreamCoordinator {
                 if count == 0 { self.gestureChords.forget() }                 // and did not open a view it could close
                 // On the software encoder, the hardware is checked only while someone watches.
                 if count == 0 { self.stopRecheck() } else { self.devicesPresent(firstArrived: wasEmpty) }
+                // The display stays on while a device is connected; a stream lost to its sleep is
+                // nobody's once the last device has left.
+                if !self.synthetic { self.displayWake.hold(count > 0) }
+                if count == 0 { self.lostToDisplaySleep = nil }
                 if count > 0 {
                     self.deselectWhenSettled = false
                 } else if self.switching {
@@ -458,7 +474,16 @@ package final class StreamCoordinator {
         }
         capture.onStopped = { [weak self] error in
             print("Capture stopped: \(error.localizedDescription)")
-            Task { @MainActor in await self?.select(.none) }
+            Task { @MainActor in await self?.captureStopped(error) }
+        }
+        // The display back on (someone at the Mac, or a wake that came late): a source its sleep
+        // stopped streams again. NSWorkspace's notifications need the AppKit loop.
+        if appKitLoop, !synthetic {
+            screensWokeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in await self?.resumeAfterDisplaySleep() }
+            }
         }
         // Status for the menu bar app. The server's callbacks hop here from its network queue; the
         // stats tick runs on the main queue, which under the CLI's dispatchMain is drained by a
@@ -1187,11 +1212,44 @@ package final class StreamCoordinator {
     /// device, or a pick made before the device heard of the close, can still let it land during
     /// a restart that follows the user's pick, and then it is queued like the user's own.
     private func handlePick(_ source: StreamSource) async {
+        lostToDisplaySleep = nil        // the device's pick wins over a restart after the display's sleep
         if switching {
             if let r = restartOf, source != r { pickArrivedWhileSwitching = source }
             return
         }
         await select(source, bringForward: true)
+    }
+
+    /// The capture ended on its own. The host used to select nothing and say so, whatever the
+    /// cause, and a device then watched a stopped stream until someone picked again. When the
+    /// display went to sleep under a device (SCStream's "no capture source" for the Desktop, or the
+    /// display reading asleep), the same source comes back instead: `select` turns the display on
+    /// first. At most once per 10 s; past that, or when the display stays asleep, nothing streams
+    /// as before until the display comes back (`resumeAfterDisplaySleep`).
+    private func captureStopped(_ error: Error) async {
+        let lost = active
+        let ns = error as NSError
+        let noSource = ns.domain == SCStreamErrorDomain && ns.code == SCStreamError.Code.noCaptureSource.rawValue
+        let slept = !synthetic && lost != .none && (DisplayWake.isAsleep || (noSource && lost == .desktop))
+        await select(.none)
+        guard slept, catalog.clientCount > 0 else { return }
+        lostToDisplaySleep = lost
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastSleepRestart >= 10 else {
+            print("Display: asleep again within 10 s; the stream waits for it to come back.")
+            return
+        }
+        lastSleepRestart = now
+        print("Display: went to sleep under a device; waking it and restarting the stream.")
+        await resumeAfterDisplaySleep()
+    }
+
+    /// Restarts the source the display's sleep stopped, if a device still watches and nothing
+    /// else was picked meanwhile. A select already running drops it, as it drops any pick then.
+    private func resumeAfterDisplaySleep() async {
+        guard let lost = lostToDisplaySleep, catalog.clientCount > 0, active == .none, !switching else { return }
+        lostToDisplaySleep = nil
+        await select(lost)
     }
 
     /// Streams `source` in place of whatever streams now. Also how the host restarts the current
@@ -1316,6 +1374,13 @@ package final class StreamCoordinator {
         // frame (WindowRestore, issue #57): another window or the Desktop picked, `.none` when the
         // last device leaves or the stream stops. A restart of the same window keeps it fitted.
         if case .window(let next) = source { restoreFits(keeping: next) } else { restoreFits(keeping: nil) }
+
+        // A sleeping display gives a new capture no frame and stops a running one: turn it on
+        // first, then list the displays again, as a poll during its sleep may have found none.
+        if source != .none, !synthetic, DisplayWake.isAsleep {
+            if await displayWake.wake() { await catalog.refreshWindows() }
+            guard !shuttingDown else { active = .none; broadcastList(); return }
+        }
 
         var filter: SCContentFilter?     // nil only for the synthetic test pattern
         var sourceRect: CGRect? = nil    // set only when the window streams from the virtual display
