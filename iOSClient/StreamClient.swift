@@ -314,6 +314,9 @@ final class StreamClient: ObservableObject {
     @Published var videoSize: CGSize = .zero {
         didSet { if videoSize != oldValue { pictureZoom.reset(animated: false) } }
     }
+    /// The Mac's keyboard focus is in a place that takes text (kind 33, from a host that says so):
+    /// the stream screen brings the keyboard up by itself. False from older hosts, which never send it.
+    @Published var macTextFocus = false
     /// The picture's own zoom on this device (a pinch on the stream): the overlay changes it, the
     /// display view draws it. Main thread.
     let pictureZoom = PictureZoom()
@@ -789,6 +792,9 @@ final class StreamClient: ObservableObject {
     /// six, nil from a Mac before 2026-09-27, which is sent none (`sendGesture`). Cleared with the
     /// session.
     @Published var hostGestures: Int?
+    /// Whether this session's Mac quits a window's app from the bar's long press
+    /// (`WindowList.windowQuit`). Cleared with the session.
+    @Published var hostWindowQuit = false
     /// The clipboard (kind 32, StreamClient+Clipboard, docs/clipboard-plan.md): what this session's
     /// Mac takes and sends (`WindowList.clipboard`, 1 for text), nil from a Mac before it or with Share
     /// clipboard with devices off. Cleared with the session.
@@ -818,6 +824,9 @@ final class StreamClient: ObservableObject {
     /// A Paste waiting for the pong that says the Mac has read it (ClipboardPolicy.receiptLength), and
     /// its timeout (`receiptWait`).
     var clipboardReceipt: ClipboardReceipt?
+    /// The ping sent after an image from the Paste button: its pong says the Mac has the image, and
+    /// ⌘V follows (StreamClient+Clipboard, `pasteImage`).
+    var imagePasteNonce: Data?
     var clipboardReceiptExpiry: DispatchWorkItem?
     /// This device's path (status, interfaces, cost), for "did it leave home since the loss".
     var pathSignature = ""
@@ -3125,6 +3134,7 @@ final class StreamClient: ObservableObject {
         hostVersion = nil
         hostProtocol = nil
         hostGestures = nil
+        hostWindowQuit = false
         remoteRoute = nil
         macInfo = nil
         macInfoSaved = false
@@ -3637,6 +3647,8 @@ final class StreamClient: ObservableObject {
                 if self.hostVersion != list.hostVersion { self.hostVersion = list.hostVersion }
                 if self.hostProtocol != list.protocol { self.hostProtocol = list.protocol }
                 if self.hostGestures != list.gestures { self.hostGestures = list.gestures }
+                let quits = (list.windowQuit ?? 0) >= 1
+                if self.hostWindowQuit != quits { self.hostWindowQuit = quits }
                 // The clipboard: subscribe (or stop) as the Mac's word and this device's switch say.
                 self.hostClipboardChanged(list.clipboard)
                 if !self.sessionListed {
@@ -3780,6 +3792,15 @@ final class StreamClient: ObservableObject {
             DispatchQueue.main.async {
                 guard self.connection === from else { return }
                 self.goodbye = goodbye
+            }
+        case .textFocus:
+            // The Mac's focus went into or out of a text field (kind 33): the stream screen brings the
+            // keyboard up or takes down one it brought. Only from the current connection.
+            guard let focus = Wire.decode(TextFocus.self, from: data) else { return }
+            let from = connection
+            DispatchQueue.main.async {
+                guard self.connection === from else { return }
+                self.macTextFocus = focus.editable
             }
         case .clipboard:
             // Text copied on the Mac (StreamClient+Clipboard): written to this device's clipboard while

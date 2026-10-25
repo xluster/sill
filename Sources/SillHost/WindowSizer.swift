@@ -156,6 +156,8 @@ final class WindowSizer {
         case .fullScreen:
             let leaving = isFullScreen(element)
             return AXUIElementSetAttributeValue(element, "AXFullScreen" as CFString, leaving ? kCFBooleanFalse : kCFBooleanTrue) == .success
+        case .quit:
+            return false                        // the app's, not the window's: the coordinator's `quitApp`
         }
     }
 

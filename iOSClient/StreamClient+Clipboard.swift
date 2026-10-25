@@ -263,6 +263,71 @@ extension StreamClient {
 
     // MARK: Paste on the Mac
 
+    /// The most of the device's clipboard the bar's Paste button types: the Mac types a character at
+    /// a time, and one input message stays well under the door's 1 MiB.
+    static let pasteLimit = 20_000
+
+    /// The bar's Paste button: the text on this device's clipboard typed on the Mac where its cursor
+    /// is, as the software keyboard's text goes (kind 8), so every Mac takes it, one that shares no
+    /// clipboard too. Reading the clipboard from a plain button is iOS's to allow: it asks, until
+    /// Settings › Apps › Sill › Paste from Other Apps says Allow. No text: the warning haptic.
+    func pasteFromDevice() {
+        // An image and no text: through the Mac's clipboard, then ⌘V (`pasteImage`).
+        if connected, !UIPasteboard.general.hasStrings, UIPasteboard.general.hasImages {
+            pasteImage()
+            return
+        }
+        guard connected, let raw = UIPasteboard.general.string, !raw.isEmpty else {
+            if UIDevice.current.userInterfaceIdiom == .phone { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+            return
+        }
+        let text = String(raw.replacingOccurrences(of: "\r\n", with: "\n").prefix(Self.pasteLimit))
+        setOwnPointer(nil, from: .none)
+        sendInput(.text(text))
+        #if DEBUG
+        print("clipboard: typed \(text.count) characters of this device's clipboard on the Mac")
+        #endif
+    }
+
+    /// The Paste button's image: sent as kind 32's `image` to a Mac that takes one (`imageGeneration`),
+    /// which puts it on its clipboard, then a ping whose pong says the Mac read it, and then ⌘V, so it
+    /// lands where the Mac's cursor is. Within `Clipboard.maxImageBytes` (`imageForMac`). A Mac that
+    /// takes none, Share Clipboard off, or an image that cannot be made small enough: the warning haptic.
+    private func pasteImage() {
+        guard ClipboardPolicy.hostTakesImages(hostClipboard), Self.clipboardOn,
+              let image = UIPasteboard.general.image, let data = Self.imageForMac(image) else {
+            if UIDevice.current.userInterfaceIdiom == .phone { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+            return
+        }
+        setOwnPointer(nil, from: .none)
+        send(.clipboard, payload: Wire.encode(Clipboard(image: data)))
+        let nonce = Data((0..<ClipboardPolicy.receiptLength).map { _ in UInt8.random(in: .min ... .max) })
+        imagePasteNonce = nonce
+        send(.ping, payload: nonce)
+        #if DEBUG
+        print("clipboard: sent a \(data.count)-byte image to the Mac's clipboard; ⌘V once it has it")
+        #endif
+    }
+
+    /// The image as PNG when that is small enough, else JPEG at falling quality, then smaller, until it
+    /// fits `Clipboard.maxImageBytes`; nil if even that does not.
+    static func imageForMac(_ image: UIImage) -> Data? {
+        let limit = Clipboard.maxImageBytes
+        if let png = image.pngData(), png.count <= limit { return png }
+        var current = image
+        for _ in 0..<6 {
+            for quality in [0.85, 0.7, 0.5] as [CGFloat] {
+                if let jpeg = current.jpegData(compressionQuality: quality), jpeg.count <= limit { return jpeg }
+            }
+            let size = CGSize(width: current.size.width * current.scale * 0.7, height: current.size.height * current.scale * 0.7)
+            guard size.width >= 16, size.height >= 16 else { return nil }
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            current = UIGraphicsImageRenderer(size: size, format: format).image { _ in current.draw(in: CGRect(origin: .zero, size: size)) }
+        }
+        return nil
+    }
+
     /// What the system's Paste control read on the person's tap (the chip's, or the Settings group's):
     /// sent to the Mac, with its receipt to wait for, or "too long".
     func sendClipboard(_ strings: [String]) {
@@ -297,6 +362,15 @@ extension StreamClient {
     /// A receipt's pong (StreamClient.handle): the Mac has read the text. "Sent…", and the copy is dealt
     /// with. One that comes after its time ran out still counts.
     func clipboardReceiptCame(_ payload: Data) {
+        // The Paste button's image is on the Mac: ⌘V, a moment later, as the Mac writes its clipboard
+        // on a queue of its own after reading the message.
+        if let nonce = imagePasteNonce, nonce == payload {
+            imagePasteNonce = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                KeyChord.press(0x19, with: .command).forEach { self?.sendInput($0) }   // ⌘V
+            }
+            return
+        }
         guard let receipt = clipboardReceipt, receipt.nonce == payload else { return }
         clipboardReceiptExpiry?.cancel()
         clipboardReceiptExpiry = nil

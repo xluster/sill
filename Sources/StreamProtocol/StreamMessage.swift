@@ -75,6 +75,11 @@ public enum StreamMessageKind: UInt8 {
                              // on), its text becomes the Mac's clipboard, and `stop` ends the subscription; only
                              // to a host whose window list says `clipboard` 1 or more. Host → device: text copied
                              // on the Mac (or sent by another device), only to a connection that subscribed
+    // Where the Mac's keyboard focus is (TextFocus.swift), after the clipboard's 32. Older devices
+    // map it to `.unknown` and skip it.
+    case textFocus = 33      // host → device: JSON TextFocus — the Mac's focus went into or out of a place that
+                             // takes text, so the device can bring its keyboard up by itself; on each change, and
+                             // to every device once more when one connects
     case unknown = 255       // never sent: what parseHeader yields for a kind this build does not know
 }
 

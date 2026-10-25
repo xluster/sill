@@ -199,6 +199,11 @@ final class TrackpadSurface: UIView, UIGestureRecognizerDelegate {
     /// move, a scroll or a coast. iPads have no Taptic Engine; there every call is a silent no-op,
     /// which is UIKit's doing, so there is deliberately no device check here.
     private let clickHaptic = UIImpactFeedbackGenerator(style: .rigid)
+    /// The one-finger stroke now down: where and when it landed and the farthest it has gone, which
+    /// decide whether its lift is a click (`handleTap`).
+    private var tapStart: CGPoint = .zero
+    private var tapStartTime: CFTimeInterval = 0
+    private var tapTravel: CGFloat = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -310,9 +315,13 @@ final class TrackpadSurface: UIView, UIGestureRecognizerDelegate {
             trackSuspended = false
             trackLive = false
             trackLast = tracker.location(in: self)
+            tapStart = trackLast
+            tapStartTime = CACurrentMediaTime()
+            tapTravel = 0
         case .changed:
-            guard trackerDriving else { return }
             let location = tracker.location(in: self)
+            tapTravel = max(tapTravel, hypot(location.x - tapStart.x, location.y - tapStart.y))
+            guard trackerDriving else { return }
             if !trackLive {
                 guard hypot(location.x - trackLast.x, location.y - trackLast.y) > Self.trackSlop else { return }
                 trackLive = true
@@ -470,8 +479,15 @@ final class TrackpadSurface: UIView, UIGestureRecognizerDelegate {
 
     @objc private func handleTap() {
         guard !strokes.silent else { return }
+        // UIKit's tap allows 10 pt of travel and any hold, so a short slow drag of the pointer could
+        // end in a click (Alexis, 2026-10-25). A click is a touch that barely moved and lifted soon.
+        guard tapTravel <= Self.tapSlop, CACurrentMediaTime() - tapStartTime <= Self.tapLongest else { return }
         click(down: .leftDown, up: .leftUp)
     }
+
+    /// The most a finger may travel, and the longest it may stay down, for its lift to be a click.
+    private static let tapSlop: CGFloat = 5
+    private static let tapLongest: CFTimeInterval = 0.3
 
     /// Two fingers is the right button, the way a Mac trackpad's secondary click works.
     @objc private func handleTwoFingerTap() {

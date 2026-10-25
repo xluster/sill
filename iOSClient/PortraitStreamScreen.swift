@@ -264,11 +264,23 @@ struct PortraitStreamScreen: View {
                 .opacity(scaleOpen ? 0.2 : 1)      // the slider unfolds over the strip's end
                 .allowsHitTesting(!scaleOpen)
 
-            // The Mac's menus, as in the landscape bar: only while the Mac sent some.
-            if client.menus.hasMenus, menusFit {
-                MacMenuButton(client: client, width: metrics.buttonWidth, height: metrics.buttonHeight,
-                              radius: metrics.buttonRadius, iconSize: metrics.buttonIcon, spacing: metrics.buttonSpacing,
-                              onOpen: menusOpened, onClose: menusClosed)
+            // Paste, as in the landscape bar, in the Menus button's old place.
+            if menusFit {
+                pasteButton()
+                    .opacity(scaleOpen ? 0 : 1)
+                    .allowsHitTesting(!scaleOpen)
+            }
+
+            // The keyboard covers the key row and its keyboard key, here under the bar (the iPhone
+            // Duo's laptop pose, 2026-10-25: nothing on screen could take it down): while it is up,
+            // the bar has the key to take it down.
+            if keyboardShown {
+                barButton(open: true, symbol: "keyboard.chevron.compact.down", label: "Keyboard",
+                          accessibilityLabel: "Hide the keyboard",
+                          action: {
+                              setSettings(false, false)
+                              overlay.toggleKeyboard()
+                          })
                     .opacity(scaleOpen ? 0 : 1)
                     .allowsHitTesting(!scaleOpen)
                     .transition(.opacity)
@@ -289,7 +301,7 @@ struct PortraitStreamScreen: View {
         }
         .frame(height: metrics.barHeight)
         .animation(.easeOut(duration: 0.16), value: scaleOpen)
-        .animation(.easeOut(duration: 0.18), value: client.menus.hasMenus)
+        .animation(.easeOut(duration: 0.18), value: keyboardShown)
     }
 
     // MARK: A phone held upright
@@ -340,7 +352,7 @@ struct PortraitStreamScreen: View {
             // beside them.
             PhoneRows(size: layout.size, rects: rects) {
                 picturePane(measured: false).accessibilityHidden(drawerOpen)
-                phoneRow1(layout, menus: larger && client.menus.hasMenus)
+                phoneRow1(layout, menus: larger)
                 if !larger {
                     phoneRow2(layout)
                         .opacity(drawerOpen || settingsOpen ? 0 : 1)
@@ -388,12 +400,9 @@ struct PortraitStreamScreen: View {
                 .tourTarget(.apps)
 
             if menus {
-                MacMenuButton(client: client, width: layout.menus.width, height: layout.menus.height,
-                              radius: metrics.buttonRadius, iconSize: metrics.buttonIcon, spacing: metrics.buttonSpacing,
-                              iconBox: PortraitMetrics.phoneIconBox, onOpen: menusOpened, onClose: menusClosed)
+                pasteButton(width: layout.menus.width)
                     .opacity(scaleOpen ? 0 : 1)
                     .allowsHitTesting(!scaleOpen)
-                    .transition(.opacity)
             }
 
             TextScaleControl(scale: $textScale, open: $scaleOpen,
@@ -430,20 +439,15 @@ struct PortraitStreamScreen: View {
     /// row 1, whose five share the row (the approved mockup's). The strip still shows a whole
     /// thumbnail and more on every phone.
     private func phoneRow2(_ layout: PhonePortraitLayout) -> some View {
-        let menus = client.menus.hasMenus
-        let strip = menus ? layout.stripBesideMenus : layout.strip
+        // Paste, in the Menus button's old place, always there.
+        let strip = layout.stripBesideMenus
         return ZStack(alignment: .topLeading) {
             windowStrip.frame(width: strip.width, height: strip.height)
-            if menus {
-                MacMenuButton(client: client, width: layout.menus.width, height: layout.menus.height,
-                              radius: metrics.buttonRadius, iconSize: metrics.buttonIcon, spacing: metrics.buttonSpacing,
-                              iconBox: PortraitMetrics.phoneIconBox, onOpen: menusOpened, onClose: menusClosed)
-                    .offset(x: layout.menus.minX - layout.strip.minX, y: layout.menus.minY - layout.strip.minY)
-                    .transition(.opacity)
-            }
+            pasteButton(width: layout.menus.width)
+                .frame(height: layout.menus.height)
+                .offset(x: layout.menus.minX - layout.strip.minX, y: layout.menus.minY - layout.strip.minY)
         }
         .frame(width: layout.strip.width, height: layout.strip.height, alignment: .topLeading)
-        .animation(.easeOut(duration: 0.18), value: menus)
     }
 
     // MARK: Shared by both
@@ -540,6 +544,14 @@ struct PortraitStreamScreen: View {
         barButton(open: client.active == .desktop, symbol: "desktopcomputer", label: "Desktop", width: width,
                   accessibilityLabel: "Show the full Mac desktop",
                   action: { client.select(.desktop) })
+    }
+
+    /// Paste, in the Menus button's old place: this device's clipboard typed on the Mac where its
+    /// cursor is (`StreamClient.pasteFromDevice`).
+    private func pasteButton(width: CGFloat? = nil) -> some View {
+        barButton(open: false, symbol: "doc.on.clipboard", label: "Paste", width: width,
+                  accessibilityLabel: "Paste the clipboard on \(client.macName.isEmpty ? "the Mac" : client.macName)",
+                  action: { client.pasteFromDevice() })
     }
 
     /// Leave's old slot: Disconnect is the Settings panel's pinned last row now.

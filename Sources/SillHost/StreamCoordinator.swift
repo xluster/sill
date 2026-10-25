@@ -274,6 +274,8 @@ package final class StreamCoordinator {
     /// The display kept on while a device is connected, and woken before a capture (DisplayWake).
     /// Never on a synthetic host: the test pattern is not the screen.
     private let displayWake = DisplayWake()
+    /// Whether the Mac's keyboard focus takes text, sent to the devices as kind 33 (TextFocusWatch).
+    private let textFocus = TextFocusWatch()
     /// The source whose capture the display's sleep stopped while a device watched: restarted
     /// once the display is on again (`captureStopped`, `resumeAfterDisplaySleep`). Cleared by a
     /// device's pick and by the last device leaving.
@@ -426,6 +428,13 @@ package final class StreamCoordinator {
                 }
             }
         }
+        textFocus.onChange = { [weak self] editable in
+            Task { @MainActor in
+                guard let self else { return }
+                self.server.broadcast(StreamMessage(kind: .textFocus, timestamp: Date().timeIntervalSince1970,
+                                                    isKeyframe: false, payload: Wire.encode(TextFocus(editable: editable))))
+            }
+        }
         server.onClientCountChanged = { [weak self] count in
             Task { @MainActor in
                 guard let self else { return }
@@ -440,6 +449,9 @@ package final class StreamCoordinator {
                 // nobody's once the last device has left.
                 if !self.synthetic { self.displayWake.hold(count > 0) }
                 if count == 0 { self.lostToDisplaySleep = nil }
+                // Where the Mac's keyboard focus is, for the devices' keyboards: looked at while one
+                // is connected, and said again to all when one arrives. Never on a synthetic host.
+                if !self.synthetic { if count > 0 { self.textFocus.start() } else { self.textFocus.stop() } }
                 if count > 0 {
                     self.deselectWhenSettled = false
                 } else if self.switching {
@@ -915,7 +927,9 @@ package final class StreamCoordinator {
             guard let cmd = Wire.decode(WindowCommand.self, from: message.payload) else { return }
             gestureChords.forget()              // a window's own button: a view a gesture opened is left behind
             let done: Bool
-            if virtualDisplay, let p = stage.placement, p.windowID == cmd.id {
+            if cmd.action == .quit {
+                done = quitApp(ofWindow: cmd.id)
+            } else if virtualDisplay, let p = stage.placement, p.windowID == cmd.id {
                 done = WindowSizer.perform(cmd.action, element: p.element)
             } else if let w = catalog.window(id: cmd.id) {
                 done = sizer.perform(cmd.action, on: w)
@@ -1223,9 +1237,12 @@ package final class StreamCoordinator {
     /// The capture ended on its own. The host used to select nothing and say so, whatever the
     /// cause, and a device then watched a stopped stream until someone picked again. When the
     /// display went to sleep under a device (SCStream's "no capture source" for the Desktop, or the
-    /// display reading asleep), the same source comes back instead: `select` turns the display on
-    /// first. At most once per 10 s; past that, or when the display stays asleep, nothing streams
-    /// as before until the display comes back (`resumeAfterDisplaySleep`).
+    /// display reading asleep), the same source comes back instead. The display is turned on at
+    /// once, whatever it reads (a display going to sleep still reads awake for a moment), and the
+    /// source restarts when it says it is on (`screensDidWakeNotification`), or 2 s later if it
+    /// never said so (no AppKit loop, or it had not gone off after all), when `select` turns a
+    /// display still asleep on first. At most once per 10 s; past that, or when the display stays
+    /// asleep, nothing streams as before until the display comes back (`resumeAfterDisplaySleep`).
     private func captureStopped(_ error: Error) async {
         let lost = active
         let ns = error as NSError
@@ -1240,8 +1257,10 @@ package final class StreamCoordinator {
             return
         }
         lastSleepRestart = now
-        print("Display: went to sleep under a device; waking it and restarting the stream.")
-        await resumeAfterDisplaySleep()
+        print("Display: went to sleep under a device; waking it and restarting the stream once it is on.")
+        displayWake.declareActivity()
+        try? await Task.sleep(for: .seconds(2))
+        await resumeAfterDisplaySleep()     // nothing to do if the display's wake already restarted it
     }
 
     /// Restarts the source the display's sleep stopped, if a device still watches and nothing
@@ -2387,10 +2406,22 @@ package final class StreamCoordinator {
         StreamMessage(kind: .windowList, timestamp: Date().timeIntervalSince1970, isKeyframe: false,
                       payload: Wire.encode(WindowList(macName: macName, windows: catalog.infos, active: active, launchID: launchID,
                                                       hostVersion: hostVersion, protocol: SillProtocol.current,
-                                                      gestures: TrackpadGesture.generation, clipboard: clipboard.advertised)))
+                                                      gestures: TrackpadGesture.generation, clipboard: clipboard.advertised,
+                                                      windowQuit: 1)))
     }
 
     private func broadcastList() { server.broadcast(listMessage()) }
+
+    /// A device's Quit on a thumbnail: the window's app asked to quit as ⌘Q would (an unsaved
+    /// document still asks on the Mac). Never Sill itself, nor Finder (macOS relaunches it).
+    private func quitApp(ofWindow id: UInt32) -> Bool {
+        guard let pid = catalog.window(id: id)?.owningApplication?.processID,
+              pid != ProcessInfo.processInfo.processIdentifier,
+              let app = NSRunningApplication(processIdentifier: pid),
+              app.bundleIdentifier != "com.apple.finder" else { return false }
+        print("Quit \(app.localizedName ?? "pid \(pid)") at a device's request")
+        return app.terminate()
+    }
 
     private func sendCatalog(to connection: NWConnection) {
         let now = Date().timeIntervalSince1970

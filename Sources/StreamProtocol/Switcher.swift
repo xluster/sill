@@ -60,12 +60,17 @@ public struct WindowList: Codable {
     /// pull request #66's `Bool` (never released) does not decode here and becomes an Int as it
     /// rebases.
     public var clipboard: Int?
+    /// Whether this host takes `WindowCommand.Action.quit` (1): quit a window's app on the Mac
+    /// (Alexis, 2026-10-25). Nil from every host before it, to which a device sends no quit (its
+    /// decoder would not know the case).
+    public var windowQuit: Int?
 
     public init(macName: String, windows: [WindowInfo], active: StreamSource, launchID: String? = nil,
-                hostVersion: String? = nil, protocol: Int? = nil, gestures: Int? = nil, clipboard: Int? = nil) {
+                hostVersion: String? = nil, protocol: Int? = nil, gestures: Int? = nil, clipboard: Int? = nil,
+                windowQuit: Int? = nil) {
         self.macName = macName; self.windows = windows; self.active = active; self.launchID = launchID
         self.hostVersion = hostVersion; self.protocol = `protocol`; self.gestures = gestures
-        self.clipboard = clipboard
+        self.clipboard = clipboard; self.windowQuit = windowQuit
     }
 }
 
@@ -74,9 +79,10 @@ public struct LaunchApp: Codable {
     public init(bundleID: String) { self.bundleID = bundleID }
 }
 
-/// Client → host: what the bar's long-press menu asks of a window, the three traffic lights.
+/// Client → host: what the bar's long-press menu asks of a window, the three traffic lights, and
+/// quitting its app (`quit`, sent only to a host whose window list says `windowQuit` 1).
 public struct WindowCommand: Codable {
-    public enum Action: String, Codable { case close, minimize, fullScreen }
+    public enum Action: String, Codable { case close, minimize, fullScreen, quit }
     public var id: UInt32
     public var action: Action
     public init(id: UInt32, action: Action) { self.id = id; self.action = action }

@@ -9,6 +9,10 @@ import Foundation
 public enum ClipboardPolicy {
     /// `WindowList.clipboard` from a host that takes and sends text.
     public static let generation = 1
+    /// `WindowList.clipboard` from a host that also takes an image from a device (its Paste button,
+    /// 2026-10-25): written to the Mac's clipboard, never sent on. A device sends one only to a host
+    /// that says so; text still goes to any host that says 1 or more.
+    public static let imageGeneration = 2
     /// The most a kind 32's JSON may be, either way (Clipboard.maxTextBytes says why).
     public static let maxPayload = StreamMessage.maxClientPayload
     /// A device's subscriptions and texts a second, per connection: a tap sends one. More is a runaway
@@ -127,18 +131,24 @@ public enum ClipboardPolicy {
         case subscribe
         /// The same, and this text becomes the Mac's clipboard (and goes to every other subscriber).
         case set(String)
+        /// The same, and this image (PNG or JPEG) becomes the Mac's clipboard, for this Mac only.
+        case setImage(Data)
         /// Send this connection nothing more.
         case stop
         /// Nothing: not subscribed, nothing set.
         case refuse(Refusal)
     }
 
-    /// `stop` wins over anything with it; text that is not empty sets; anything else (`{}`, empty
-    /// text, an image alone, which this generation does not take) subscribes.
+    /// `stop` wins over anything with it; text that is not empty sets; else an image that is not
+    /// empty sets the image (`Clipboard.maxImageBytes` at most); anything else (`{}`, empty text)
+    /// subscribes.
     public static func fromDevice(_ payload: Data) -> FromDevice {
         guard let clip = Wire.decode(Clipboard.self, from: payload) else { return .refuse(.undecodable) }
         if clip.stop == true { return .stop }
-        guard let text = clip.text, !text.isEmpty else { return .subscribe }
+        guard let text = clip.text, !text.isEmpty else {
+            guard let image = clip.image, !image.isEmpty else { return .subscribe }
+            return image.count <= Clipboard.maxImageBytes ? .setImage(image) : .refuse(.tooLong)
+        }
         guard text.utf8.count <= Clipboard.maxTextBytes else { return .refuse(.tooLong) }
         return .set(text)
     }
@@ -167,7 +177,7 @@ public enum ClipboardPolicy {
     /// does nothing.
     static func countsAgainstRate(_ ask: FromDevice) -> Bool {
         switch ask {
-        case .subscribe, .set: return true
+        case .subscribe, .set, .setImage: return true
         case .stop, .refuse: return false
         }
     }
@@ -248,6 +258,9 @@ public enum ClipboardPolicy {
 
     /// Whether the Mac's list says it takes and sends the clipboard.
     public static func hostTakes(_ hostClipboard: Int?) -> Bool { (hostClipboard ?? 0) >= generation }
+
+    /// Whether the Mac's list says it takes an image from this device (`imageGeneration`).
+    public static func hostTakesImages(_ hostClipboard: Int?) -> Bool { (hostClipboard ?? 0) >= imageGeneration }
 
     public enum Subscription: Equatable, Sendable {
         /// Send `subscription` now.

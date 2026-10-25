@@ -28,8 +28,8 @@ func header(_ kind: UInt8) -> StreamHeader? {
 }
 check(StreamMessageKind.clipboard.rawValue == 32 && StreamMessageKind(rawValue: 32) == .clipboard, "kind 32 is clipboard")
 check(header(32)?.kind == .clipboard && header(32)?.payloadLength == 2, "a kind 32 header parses")
-check([29, 30, 31, 33].allSatisfy { StreamMessageKind(rawValue: $0) == nil && header($0)?.kind == .unknown },
-      "29 (the audio plan's), 30 and 31 (#66's side streams) and 33 are not this build's")
+check([29, 30, 31, 34].allSatisfy { StreamMessageKind(rawValue: $0) == nil && header($0)?.kind == .unknown },
+      "29 (the audio plan's), 30 and 31 (#66's side streams) and 34 are not this build's (33 is the text focus)")
 check(StreamMessageKind(rawValue: 28) == .gesture, "28 is still the gesture")
 let message = StreamMessage(kind: .clipboard, timestamp: 1, isKeyframe: false, payload: P.subscription).serialized()
 check(message.first == 32 && StreamMessage.parseHeader(message)?.kind == .clipboard && message.count == StreamMessage.headerLength + 2,
@@ -181,7 +181,9 @@ check(P.fromDevice(data(#"{"text":""}"#)) == .subscribe, "empty text: subscribes
 check(P.fromDevice(data(#"{"stop":true}"#)) == .stop, "stop")
 check(P.fromDevice(data(#"{"stop":true,"text":"abc"}"#)) == .stop, "stop wins over text")
 check(P.fromDevice(data(#"{"stop":false}"#)) == .subscribe, "stop false is no stop")
-check(P.fromDevice(data(#"{"image":"AQID"}"#)) == .subscribe, "an image alone: subscribes, this generation takes none")
+check(P.fromDevice(data(#"{"image":"AQID"}"#)) == .setImage(Data([1, 2, 3])), "an image alone: the image (imageGeneration)")
+check(P.fromDevice(Wire.encode(Clipboard(image: Data(count: Clipboard.maxImageBytes + 1)))) == .refuse(.tooLong), "an image over maxImageBytes: refused")
+check(P.hostTakesImages(2) && !P.hostTakesImages(1) && !P.hostTakesImages(nil) && P.hostTakes(2), "images only to a host that says 2; text to it too")
 check(P.fromDevice(data(#"{"text":"t","image":"AQID"}"#)) == .set("t"), "text and an image: the text")
 check(P.fromDevice(Wire.encode(Clipboard(text: atCap))) == .set(atCap), "at the cap: set")
 check(P.fromDevice(Wire.encode(Clipboard(text: atCap + "a"))) == .refuse(.tooLong), "over it: refused, nothing subscribed")
@@ -382,7 +384,7 @@ for _ in 0..<5_000 {
             if !hostOn { modelFailures += 1; break }    // a kind 32 to a host that did not say it takes it
             let payload = step.send == .subscribe ? P.subscription : P.stopping
             switch P.fromDevice(payload) {
-            case .subscribe, .set: hostSubscribed = true
+            case .subscribe, .set, .setImage: hostSubscribed = true
             case .stop: hostSubscribed = false
             case .refuse: modelFailures += 1
             }
@@ -427,7 +429,7 @@ for _ in 0..<5_000 {
             let got = P.hostReceives(payload, arrivals: arrivals, now: now)
             arrivals = got.kept
             switch got.ask {
-            case .subscribe, .set: hostSubscribed = true
+            case .subscribe, .set, .setImage: hostSubscribed = true
             case .stop: hostSubscribed = false
             case .refuse(.rate): if step.send == .subscribe { refusedSubscriptions += 1 }
             case .refuse: quickFailures += 1

@@ -45,11 +45,7 @@ final class DisplayWake {
     /// and the caller goes on as before this existed.
     func wake(timeout: TimeInterval = 3) async -> Bool {
         guard Self.isAsleep else { return true }
-        let result = IOPMAssertionDeclareUserActivity("Sill: a device is watching" as CFString, kIOPMUserActiveLocal, &activityID)
-        guard result == kIOReturnSuccess else {
-            print("Display: could not wake it (IOReturn \(result)).")
-            return false
-        }
+        guard declareActivity() else { return false }
         let started = CFAbsoluteTimeGetCurrent()
         while Self.isAsleep {
             guard CFAbsoluteTimeGetCurrent() - started < timeout else {
@@ -59,6 +55,20 @@ final class DisplayWake {
             try? await Task.sleep(for: .milliseconds(100))
         }
         print("Display: woken for a device in \(Int((CFAbsoluteTimeGetCurrent() - started) * 1000)) ms.")
+        return true
+    }
+
+    /// Declares user activity whatever the display reads: a display going to sleep still reads
+    /// awake for a moment (measured 2026-10-25: the capture stopped at 09:55:04.013 and the
+    /// restart 0.5 s later found it awake, so `wake` did nothing and the device saw 0 fps for
+    /// 16 s), and the activity brings it back either way. False when IOKit refused it.
+    @discardableResult
+    func declareActivity() -> Bool {
+        let result = IOPMAssertionDeclareUserActivity("Sill: a device is watching" as CFString, kIOPMUserActiveLocal, &activityID)
+        guard result == kIOReturnSuccess else {
+            print("Display: could not wake it (IOReturn \(result)).")
+            return false
+        }
         return true
     }
 }

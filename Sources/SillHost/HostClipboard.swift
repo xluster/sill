@@ -38,7 +38,7 @@ final class HostClipboard {
     /// Share clipboard with devices.
     private(set) var enabled: Bool
     /// The window lists' `clipboard`: the generation while on, nil while off.
-    var advertised: Int? { enabled ? ClipboardPolicy.generation : nil }
+    var advertised: Int? { enabled ? ClipboardPolicy.imageGeneration : nil }
 
     private let server: StreamServer
     /// The pasteboard, on its own queue: `NSPasteboard.general`, or a synthetic host's own.
@@ -160,6 +160,12 @@ final class HostClipboard {
             let others = ClipboardPolicy.forward(to: order, from: id).compactMap { subscribers[$0]?.connection }
             if testLog { print("Test clipboard: \(text.utf8.count) bytes from \(who) set on the pasteboard, sent to \(others.count) other device\(others.count == 1 ? "" : "s").") }
             send(payload: ClipboardPolicy.payload(text: text), to: others)
+        case .setImage(let image):
+            // A device's Paste button: the image on this Mac's clipboard, sent to no other device.
+            subscribe(connection, who: who)
+            board.write(image: image)
+            Stats.shared.bump("clip.recv")
+            if testLog { print("Test clipboard: a \(image.count)-byte image from \(who) set on the pasteboard.") }
         case .stop:
             guard let gone = subscribers.removeValue(forKey: id) else { return }
             order.removeAll { $0 == id }
@@ -311,6 +317,23 @@ final class HostClipboard {
                                                        ownMarker: { self.board.string(forType: own) },
                                                        text: { self.board.string(forType: .string) })
             return Look(access: access, change: (count, decision))
+        }
+
+        /// A device's image (PNG or JPEG, with a TIFF beside it for the apps that read only that), for
+        /// this Mac only, marked and counted as `write(_:)` does a text.
+        func write(image: Data) {
+            queue.async {
+                let prepared = self.board.prepareForNewContents(with: .currentHostOnly)
+                let item = NSPasteboardItem()
+                let png = image.starts(with: [0x89, 0x50, 0x4E, 0x47])
+                item.setData(image, forType: png ? .png : NSPasteboard.PasteboardType("public.jpeg"))
+                if let tiff = NSImage(data: image)?.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+                item.setString(self.launchID, forType: NSPasteboard.PasteboardType(ClipboardPolicy.ownType))
+                self.board.writeObjects([item])
+                let count = self.lastAccess.map(ClipboardPolicy.hostLooks) == false ? prepared : self.board.changeCount
+                self.ownChangeCount = count
+                self.seen = count
+            }
         }
 
         /// A device's text, for this Mac only, marked as this launch's, its change count kept. Written

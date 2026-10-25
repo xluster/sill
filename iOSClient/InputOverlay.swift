@@ -78,13 +78,21 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// The picture's own zoom (`PictureZoom`), which the display view draws with the same bounds;
     /// nil leaves the picture whole and pinches unanswered.
     var zoom: PictureZoom?
-    /// Two fingers pinching, which magnify the picture here and send the Mac nothing.
-    private weak var pinch: UIPinchGestureRecognizer?
-    /// From a pinch's start, or two fingers' pan over a magnified picture, until both recognizers are
-    /// done: the finger pan moves the picture instead of scrolling the Mac (`handlePan`).
+    /// A finger's click and long press on the picture, felt as the trackpad's are (Alexis,
+    /// 2026-10-25). iPads have no Taptic Engine: there it is UIKit's silent no-op.
+    private let clickHaptic = UIImpactFeedbackGenerator(style: .rigid)
+    /// From a pinch's start, or two fingers' pan over a magnified picture, until the finger pan ends:
+    /// the pan moves and magnifies the picture instead of scrolling the Mac (`handlePan`).
     private var zoomStroke = false
     /// The finger pan's translation already turned into the picture's move.
     private var lastPicturePan: CGPoint = .zero
+    /// The two fingers' distance when the second came down, and when last turned into the zoom: a
+    /// pinch is told from a two-finger scroll by how far that distance moves (`pinchStart`).
+    private var pinchStartDistance: CGFloat?
+    private var pinchLastDistance: CGFloat?
+    /// The fingers' distance changed by this fraction: a pinch, no longer a scroll. A two-finger
+    /// scroll keeps it within a few percent.
+    private static let pinchStart: CGFloat = 0.1
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -121,14 +129,11 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         pan.delegate = self
         addGestureRecognizer(pan)
 
-        // Two fingers pinching magnify the picture on this device (`PictureZoom`), alongside the pan,
-        // which then moves the magnified picture instead of scrolling. A two-finger double tap goes
-        // back to the whole picture, or magnifies it where it lands; a finger's tap never waits for it.
-        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch))
-        pinch.allowedTouchTypes = directOnly
-        pinch.delegate = self
-        addGestureRecognizer(pinch)
-        self.pinch = pinch
+        // Two fingers pinching magnify the picture on this device (`PictureZoom`): the finger pan
+        // tells a pinch from a scroll by the fingers' distance (`pinchStep`). A pinch recognizer
+        // beside it never took over on an iPhone Duo (2026-10-25: a pinch scrolled the Mac). A
+        // two-finger double tap goes back to the whole picture, or magnifies it where it lands; a
+        // finger's tap never waits for it.
         let zoomTap = UITapGestureRecognizer(target: self, action: #selector(handleZoomTap))
         zoomTap.numberOfTouchesRequired = 2
         zoomTap.numberOfTapsRequired = 2
@@ -216,9 +221,11 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// A finger's tap at `point`, in this view: the pointer goes there, then clicks.
     private func tap(at point: CGPoint) {
         setOwnPointer(nil, .none)
+        forgetTyped()        // the click moves the Mac's cursor away from what was typed
         guard sendPointer(.move, at: point, clamped: false) != nil else { return }
         sendPointer(.leftDown, at: point, clamped: false)
         sendPointer(.leftUp, at: point, clamped: false)
+        clickHaptic.impactOccurred(intensity: 0.6)
     }
 
     /// Long press: the right button, since there is no second finger to spare for it.
@@ -230,6 +237,7 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         guard sendPointer(.move, at: point, clamped: false) != nil else { return }
         sendPointer(.rightDown, at: point, clamped: false)
         sendPointer(.rightUp, at: point, clamped: false)
+        clickHaptic.impactOccurred(intensity: 0.8)
     }
 
     /// Finger pan: scrolling, not dragging, shaped like a Mac trackpad gesture so the Mac
@@ -245,8 +253,38 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             // Its first change carries the travel before it began, so the picture catches up.
             if zoomStroke { lastPicturePan = .zero }
         }
+        if gesture.state == .began || gesture.state == .changed { pinchStep(gesture) }
         if zoomStroke { panPicture(gesture); return }
         scroll(gesture, .finger)
+    }
+
+    /// Two fingers on the finger pan: once their distance has moved `pinchStart` from where the second
+    /// came down, a pinch, and from then on each step magnifies the picture by the distance's own
+    /// change, about the point between them. One finger forgets the distance, so a second landing
+    /// again starts afresh.
+    private func pinchStep(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.numberOfTouches == 2, let zoom else {
+            pinchStartDistance = nil
+            pinchLastDistance = nil
+            return
+        }
+        let a = gesture.location(ofTouch: 0, in: self), b = gesture.location(ofTouch: 1, in: self)
+        let distance = hypot(b.x - a.x, b.y - a.y)
+        let focus = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        guard distance > 0, let start = pinchStartDistance, start > 0 else {
+            pinchStartDistance = distance
+            pinchLastDistance = distance
+            return
+        }
+        if !zoomStroke {
+            guard abs(distance / start - 1) >= Self.pinchStart else { return }
+            beginZoomStroke()
+            pinchLastDistance = start    // the travel to here magnifies too
+        }
+        let whole = wholeVideoRect
+        guard let last = pinchLastDistance, last > 0, whole.width > 0, whole.height > 0 else { return }
+        zoom.pinch(by: distance / last, at: focus, in: bounds, video: whole)
+        pinchLastDistance = distance
     }
 
     /// The iPad's trackpad (two fingers) or a Magic Mouse over the picture: the finger pan's path, at
@@ -343,15 +381,12 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     /// The pointer's scrolls and its hover run together: the pointer rests over the picture while two
-    /// fingers scroll. The pinch and the finger pan run together too: the pan moves what the pinch
-    /// magnifies.
+    /// fingers scroll.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         let scrolls = [trackpadScroll, wheelScroll].compactMap { $0 }
         return (scrolls.contains { $0 === gestureRecognizer } && other === hover)
             || (scrolls.contains { $0 === other } && gestureRecognizer === hover)
-            || (gestureRecognizer === pinch && other === scrollPan)
-            || (gestureRecognizer === scrollPan && other === pinch)
     }
 
     /// A stroke just went silent (TrackpadGestures: three fingers down): a scroll it had begun (a first
@@ -366,27 +401,6 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     // MARK: - The picture's own zoom
-
-    /// Two fingers pinching: the picture grows or shrinks on this device about the point between
-    /// them (`PictureZoom`), from whole to `PictureZoom.maxScale`; the Mac is told nothing. Below
-    /// `snapScale` at the lift, it springs back whole.
-    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-        switch gesture.state {
-        case .began, .changed:
-            guard let zoom, !strokes.silent else { return }
-            let whole = wholeVideoRect
-            guard whole.width > 0, whole.height > 0 else { return }
-            if gesture.state == .began { beginZoomStroke() }
-            zoom.pinch(by: gesture.scale, at: gesture.location(in: self), in: bounds, video: whole)
-            gesture.scale = 1
-        case .ended, .cancelled:
-            let whole = wholeVideoRect
-            if whole.width > 0, whole.height > 0 { zoom?.settle(in: bounds, video: whole) }
-            endZoomStrokeIfIdle()
-        default:
-            break
-        }
-    }
 
     /// A two-finger double tap: back to the whole picture, or magnified where it landed.
     @objc private func handleZoomTap(_ gesture: UITapGestureRecognizer) {
@@ -412,7 +426,9 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         send(.scrollGesture(.ended, x: p.x, y: p.y))
     }
 
-    /// The finger pan in a zoom stroke: the magnified picture follows the fingers.
+    /// The finger pan in a zoom stroke: the magnified picture follows the fingers. A finger left down
+    /// after the other lifted keeps moving the picture rather than scrolling the Mac, until it lifts:
+    /// then the stroke ends, and below `PictureZoom.snapScale` the picture springs back whole.
     private func panPicture(_ gesture: UIPanGestureRecognizer) {
         switch gesture.state {
         case .began, .changed:
@@ -423,18 +439,13 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             guard whole.width > 0, whole.height > 0 else { return }
             zoom?.pan(by: delta, in: bounds, video: whole)
         default:
+            let whole = wholeVideoRect
+            if whole.width > 0, whole.height > 0 { zoom?.settle(in: bounds, video: whole) }
+            zoomStroke = false
             lastPicturePan = .zero
-            endZoomStrokeIfIdle()
+            pinchStartDistance = nil
+            pinchLastDistance = nil
         }
-    }
-
-    /// The zoom stroke ends once neither the pinch nor the finger pan is still going, so a finger
-    /// left down after the other lifted keeps moving the picture rather than scrolling the Mac.
-    private func endZoomStrokeIfIdle() {
-        let going = { (r: UIGestureRecognizer?) in r?.state == .began || r?.state == .changed }
-        guard !going(scrollPan), !going(pinch) else { return }
-        zoomStroke = false
-        lastPicturePan = .zero
     }
 
     /// The coast after a flick, at the point the finger lifted. Steps are converted to fractions
@@ -670,6 +681,17 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// this view holds no text of its own.
     var hasText: Bool { true }
 
+    /// What this view has typed on the Mac since the last click, the keyboard going or a reset: the
+    /// document iOS edits through UITextInput (the extension below), which dictation needs (with
+    /// UIKeyInput alone its words were never typed, 2026-10-25) and an input method's marked text
+    /// uses. Offsets are UTF-16; the Mac's cursor is taken to be at its end.
+    private var typed = ""
+    /// The marked text's range in `typed`, while an input method or dictation holds some.
+    private var typedMarked: NSRange?
+    weak var inputDelegate: UITextInputDelegate?
+    var markedTextStyle: [NSAttributedString.Key: Any]?
+    lazy var tokenizer: UITextInputTokenizer = UITextInputStringTokenizer(textInput: self)
+
     // The latched-modifier rule, which decides which of the two keyboard paths a character takes:
     //
     //   • Shift alone changes what character the software keyboard produces, and it already did:
@@ -687,6 +709,13 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     func insertText(_ text: String) {
         setOwnPointer(nil, .none)
+        // Marked text (an input method's, dictation's) becomes this text: typed in its place.
+        if let marked = typedMarked {
+            typedMarked = nil
+            retype(marked, with: text)
+            consumeLatch()
+            return
+        }
         if !latchedModifiers.isDisjoint(with: .shortcutMakers), text.count == 1,
            let character = text.first, let usage = HIDKey.usage(for: character) {
             sendLatched(usage)
@@ -703,6 +732,8 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             return
         }
         send(.text(text))
+        typed += text
+        trimTyped()
         consumeLatch()
     }
 
@@ -713,7 +744,39 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             return
         }
         send(.text("\u{8}"))
+        if !typed.isEmpty { typed.removeLast() }
+        typedMarked = nil
         consumeLatch()
+    }
+
+    /// `range` of what was typed replaced by `text`, on the Mac too: Delete back to the range's start,
+    /// then the new text and whatever followed the range typed again, all in one text event (the
+    /// Mac's cursor is at the end).
+    private func retype(_ range: NSRange, with text: String) {
+        let ns = typed as NSString
+        let start = min(max(range.location, 0), ns.length)
+        let end = min(max(range.location + range.length, start), ns.length)
+        let after = ns.substring(from: end)
+        let out = String(repeating: "\u{8}", count: ns.substring(from: start).count) + text + after
+        if !out.isEmpty { send(.text(out)) }
+        typed = ns.substring(to: start) + text + after
+        trimTyped()
+    }
+
+    /// What was typed no longer sits before the Mac's cursor (a click moved it, the keyboard went), or
+    /// grew long: iOS is told the document is new and empty.
+    func forgetTyped() {
+        guard !typed.isEmpty || typedMarked != nil else { return }
+        inputDelegate?.selectionWillChange(self)
+        inputDelegate?.textWillChange(self)
+        typed = ""
+        typedMarked = nil
+        inputDelegate?.textDidChange(self)
+        inputDelegate?.selectionDidChange(self)
+    }
+
+    private func trimTyped() {
+        if typedMarked == nil, (typed as NSString).length > 4_000 { forgetTyped() }
     }
 
     /// One key, down and up, carrying the latched modifier bits, then the latch is spent.
@@ -763,6 +826,7 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if resigned {
+            forgetTyped()
             releaseForwardedKeys()
             keyboardProxy?.resigned(self)
         }
@@ -938,6 +1002,124 @@ final class InputOverlayView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private func releaseForwardedKeys() {
         for up in forwarded.releaseAll() { send(up) }
     }
+}
+
+// MARK: - The text iOS edits
+
+/// A place in what InputOverlayView typed: a UTF-16 offset.
+final class TypedPosition: UITextPosition {
+    let offset: Int
+    init(_ offset: Int) { self.offset = offset }
+}
+
+/// A stretch of what InputOverlayView typed, its ends in order.
+final class TypedRange: UITextRange {
+    let from: TypedPosition
+    let to: TypedPosition
+    init(_ a: Int, _ b: Int) {
+        from = TypedPosition(min(a, b))
+        to = TypedPosition(max(a, b))
+    }
+    override var start: UITextPosition { from }
+    override var end: UITextPosition { to }
+    override var isEmpty: Bool { from.offset == to.offset }
+    var nsRange: NSRange { NSRange(location: from.offset, length: to.offset - from.offset) }
+}
+
+/// The document dictation and input methods edit: what this view typed on the Mac since the last
+/// click (`typed`), its cursor always at the end, where the Mac's is. Every edit goes out as typing
+/// (`retype`): Delete back to where it starts, then the new text. Nothing is drawn: no caret, no
+/// selection, no rects.
+extension InputOverlayView: UITextInput {
+    private var typedLength: Int { (typed as NSString).length }
+
+    func text(in range: UITextRange) -> String? {
+        guard let r = range as? TypedRange else { return nil }
+        let ns = typed as NSString
+        let start = min(r.from.offset, ns.length), end = min(r.to.offset, ns.length)
+        return ns.substring(with: NSRange(location: start, length: end - start))
+    }
+
+    func replace(_ range: UITextRange, withText text: String) {
+        guard let r = range as? TypedRange else { return }
+        setOwnPointer(nil, .none)
+        typedMarked = nil
+        retype(r.nsRange, with: text)
+    }
+
+    /// The cursor stays at the end, where the Mac's is: a selection set elsewhere is not kept.
+    var selectedTextRange: UITextRange? {
+        get { TypedRange(typedLength, typedLength) }
+        set {}
+    }
+
+    var markedTextRange: UITextRange? { typedMarked.map { TypedRange($0.location, $0.location + $0.length) } }
+
+    func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        setOwnPointer(nil, .none)
+        let text = markedText ?? ""
+        let range = typedMarked ?? NSRange(location: typedLength, length: 0)
+        retype(range, with: text)
+        typedMarked = text.isEmpty ? nil : NSRange(location: range.location, length: (text as NSString).length)
+    }
+
+    func unmarkText() { typedMarked = nil }
+
+    var beginningOfDocument: UITextPosition { TypedPosition(0) }
+    var endOfDocument: UITextPosition { TypedPosition(typedLength) }
+
+    func textRange(from fromPosition: UITextPosition, to toPosition: UITextPosition) -> UITextRange? {
+        guard let a = fromPosition as? TypedPosition, let b = toPosition as? TypedPosition else { return nil }
+        return TypedRange(a.offset, b.offset)
+    }
+
+    func position(from position: UITextPosition, offset: Int) -> UITextPosition? {
+        guard let p = position as? TypedPosition else { return nil }
+        let o = p.offset + offset
+        return (0...typedLength).contains(o) ? TypedPosition(o) : nil
+    }
+
+    func position(from position: UITextPosition, in direction: UITextLayoutDirection, offset: Int) -> UITextPosition? {
+        switch direction {
+        case .left, .up: return self.position(from: position, offset: -offset)
+        default: return self.position(from: position, offset: offset)
+        }
+    }
+
+    func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult {
+        guard let a = position as? TypedPosition, let b = other as? TypedPosition else { return .orderedSame }
+        return a.offset < b.offset ? .orderedAscending : a.offset > b.offset ? .orderedDescending : .orderedSame
+    }
+
+    func offset(from: UITextPosition, to toPosition: UITextPosition) -> Int {
+        guard let a = from as? TypedPosition, let b = toPosition as? TypedPosition else { return 0 }
+        return b.offset - a.offset
+    }
+
+    func position(within range: UITextRange, farthestIn direction: UITextLayoutDirection) -> UITextPosition? {
+        guard let r = range as? TypedRange else { return nil }
+        switch direction {
+        case .left, .up: return r.from
+        default: return r.to
+        }
+    }
+
+    func characterRange(byExtending position: UITextPosition, in direction: UITextLayoutDirection) -> UITextRange? {
+        guard let p = position as? TypedPosition else { return nil }
+        switch direction {
+        case .left, .up: return TypedRange(0, p.offset)
+        default: return TypedRange(p.offset, typedLength)
+        }
+    }
+
+    func baseWritingDirection(for position: UITextPosition, in direction: UITextStorageDirection) -> NSWritingDirection { .natural }
+    func setBaseWritingDirection(_ writingDirection: NSWritingDirection, for range: UITextRange) {}
+    func firstRect(for range: UITextRange) -> CGRect { .zero }
+    func caretRect(for position: UITextPosition) -> CGRect { .zero }
+    func selectionRects(for range: UITextRange) -> [UITextSelectionRect] { [] }
+    func closestPosition(to point: CGPoint) -> UITextPosition? { endOfDocument }
+    func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? { range.end }
+    func characterRange(at point: CGPoint) -> UITextRange? { nil }
 }
 
 /// Who holds the keyboard on the stream screen: the stream screen's Keyboard button, the Settings

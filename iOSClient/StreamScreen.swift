@@ -140,6 +140,14 @@ struct StreamScreen: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The stream panel's size in points, reported by whichever layout is showing.
     @State private var panelSize: CGSize = .zero
+    /// How much of the screen's bottom the software keyboard covers (zero while it is down, or for a
+    /// hardware keyboard's empty input view). Sideways the picture shrinks above it so the whole Mac
+    /// stays in view (Alexis, 2026-10-25); the viewport keeps the size from before, so the Mac's
+    /// window is not resized each time the keyboard comes and goes.
+    @State private var keyboardCover: CGFloat = 0
+    /// The keyboard is up because the Mac's focus went into a text field (`client.macTextFocus`), so
+    /// it goes down by itself when the focus leaves; one the person brought up stays.
+    @State private var keyboardForTextField = false
     /// The viewport send waiting out its debounce, if any.
     @State private var pendingViewport: Task<Void, Never>? = nil
     /// The line over the stream while the link cannot carry the quality (docs/remote-bundle-plan.md
@@ -173,6 +181,10 @@ struct StreamScreen: View {
     /// This device's Larger Picture switch (the Settings panel's This iPhone; docs/larger-picture-plan.md).
     /// It acts only while a window streams (`largerPictureNow`).
     @AppStorage(StreamClient.largerPictureKey) private var largerPicture = false
+    /// The landscape bar hidden for a picture that fills the screen (the small tab just under it),
+    /// until the tab over the picture's top brings it back. Kept across launches; the tour shows it
+    /// whatever this says, its cards point at the bar.
+    @AppStorage("Sill.barHidden") private var barHidden = false
     /// Larger Picture as it was in effect when the Settings panel opened (`largerPictureNow`), which
     /// the arrangement keeps until the panel closes; nil while it is closed. The panel hangs under row
     /// 1, which the arrangement moves by the picture's growth (157 pt on an 18 Pro Max), so a change
@@ -325,7 +337,7 @@ struct StreamScreen: View {
         .background(Color.black)
         .overlayPreferenceValue(WindowMenuAnchorKey.self) { anchor in
             if let anchor, let id = windowMenu, let window = client.windows.first(where: { $0.id == id }) {
-                WindowLightsMenu(anchor: anchor, window: window,
+                WindowLightsMenu(anchor: anchor, window: window, canQuit: client.hostWindowQuit,
                                  command: { action in client.command(action, window: id); closeWindowMenu() },
                                  dismiss: closeWindowMenu,
                                  alwaysBelow: DuoLayout.drawsPhone)
@@ -345,6 +357,32 @@ struct StreamScreen: View {
         .onChange(of: scaleOpen) { _, open in if open { setSettings(false) } }
         .onChange(of: windowMenu) { _, menu in if menu != nil { setSettings(false) } }
         .ignoresSafeArea(edges: .bottom)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
+            let screen = (note.object as? UIScreen)?.bounds ?? UIScreen.main.bounds
+            let cover = max(0, screen.maxY - end.minY)
+            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+            withAnimation(.easeOut(duration: duration)) { keyboardCover = cover }
+        }
+        // A text field focused on the Mac brings the keyboard up, as on the phone itself (Alexis,
+        // 2026-10-25), unless a hardware keyboard types or something is open over the stream; the
+        // focus leaving takes down only a keyboard it brought.
+        .onChange(of: client.macTextFocus) { _, editable in
+            let free = !HardwareKeyboardMonitor.shared.attached && tour == nil && !overlayShown
+                && !settingsOpen && !drawerOpen
+            if editable, free, !keyboardShown {
+                overlay.setKeyboard(shown: true)
+                keyboardForTextField = true
+            } else if !editable, keyboardForTextField, keyboardShown {
+                overlay.setKeyboard(shown: false)
+                keyboardForTextField = false
+            }
+        }
+        .onChange(of: keyboardShown) { _, shown in if !shown { keyboardForTextField = false } }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
+            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+            withAnimation(.easeOut(duration: duration)) { keyboardCover = 0 }
+        }
         .onAppear {
             // A fresh connection starts on the Desktop (the client asks for it as soon as the host
             // reports nothing streaming), so the drawer stays closed until the user opens it.
@@ -1027,19 +1065,24 @@ struct StreamScreen: View {
     private func landscape(bar plain: BarMetrics, width: CGFloat, fold: FoldInfo) -> some View {
         // The book pose (docs/iphone-duo-plan.md, (a)): nothing on the fold's band; elsewhere as before.
         let (bar, stripWidth) = plain.clearing(fold, width: width)
+        let showsBar = !barHidden || tourOnScreen
         return VStack(spacing: 0) {
-            TopBar(client: client, metrics: bar, stripWidth: stripWidth, drawerOpen: $drawerOpen,
-                   keyboardShown: $keyboardShown,
-                   textScale: $textScale, scaleOpen: $scaleOpen, windowMenu: $windowMenu,
-                   settingsOpen: settingsOpen,
-                   // Apps, Menus, Aa, Keyboard, Desktop, Settings, and the strip.
-                   menusFit: MacMenuButton.fits(width: width - 2 * bar.padding, buttons: 6, buttonWidth: bar.buttonWidth,
-                                                gap: bar.gap, thumbWidth: bar.thumbWidth),
-                   toggleKeyboard: { overlay.toggleKeyboard() },
-                   setSettings: { setSettings($0, restoreKeyboard: $1) },
-                   menusOpened: menusOpened, menusClosed: menusClosed)
-            contentArea(bar: bar)
+            if showsBar {
+                TopBar(client: client, metrics: bar, stripWidth: stripWidth, drawerOpen: $drawerOpen,
+                       keyboardShown: $keyboardShown,
+                       textScale: $textScale, scaleOpen: $scaleOpen, windowMenu: $windowMenu,
+                       settingsOpen: settingsOpen,
+                       // Apps, Paste, Aa, Keyboard, Desktop, Settings, and the strip.
+                       menusFit: MacMenuButton.fits(width: width - 2 * bar.padding, buttons: 6, buttonWidth: bar.buttonWidth,
+                                                    gap: bar.gap, thumbWidth: bar.thumbWidth),
+                       toggleKeyboard: { overlay.toggleKeyboard() },
+                       setSettings: { setSettings($0, restoreKeyboard: $1) },
+                       menusOpened: menusOpened, menusClosed: menusClosed)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            contentArea(bar: bar, barTab: tourOnScreen ? nil : !showsBar)
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: showsBar)
     }
 
     /// `largerKeyboard`: Larger Picture's keyboard on a phone (see `body`), nil otherwise.
@@ -1061,7 +1104,9 @@ struct StreamScreen: View {
 
     private var streamShape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
 
-    private func contentArea(bar: BarMetrics) -> some View {
+    /// `barTab`: the small tab just under the bar that hides it (false) or, the bar hidden, brings it
+    /// back (true); nil for none (the tour shows the bar).
+    private func contentArea(bar: BarMetrics, barTab: Bool? = nil) -> some View {
         ZStack(alignment: .topLeading) {
             Color.black
 
@@ -1082,10 +1127,12 @@ struct StreamScreen: View {
             .overlay(alignment: .top) { LinkLineView(text: shownLinkLine) }
             .clipShape(streamShape)
             .overlay(streamShape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
-            // The panel itself, inside the padding: the size the host fits the Mac window to.
-            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { panelSize = $0 })
+            // The panel itself, inside the padding: the size the host fits the Mac window to, but
+            // for the keyboard's squeeze.
+            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { if keyboardCover == 0 { panelSize = $0 } })
             .tourTarget(.stream)
             .padding(8)
+            .padding(.bottom, keyboardCover)
 
             // The dim comes after the overlay on purpose: with the drawer open a tap on the dim
             // closes the drawer instead of clicking the Mac.
@@ -1123,6 +1170,26 @@ struct StreamScreen: View {
                     .padding(.trailing, bar.padding)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .transition(settingsTransition())
+            }
+
+            // A small tab just under the bar, at the picture's top centre (the Mac's menu bar is quiet
+            // there): up hides the bar, so the picture fills the screen; down brings it back
+            // (Alexis, 2026-10-25). 44 pt to touch, drawn smaller.
+            if let hidden = barTab {
+                Button { barHidden = !hidden } label: {
+                    Image(systemName: hidden ? "chevron.compact.down" : "chevron.compact.up")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Palette.text)
+                        .frame(width: 56, height: 24)
+                        .background(Palette.bar.opacity(0.85), in: Capsule())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(hidden ? "Show the bar" : "Hide the bar")
+                .frame(maxWidth: .infinity, alignment: .center)
+                .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1255,15 +1322,15 @@ private struct TopBar: View {
             // The book pose: the fold's band, and nothing on it, between the strip and the buttons.
             if stripWidth != nil { Spacer(minLength: 0) }
 
-            // The Mac's menus of the streamed app, next to the thumbnails because they are the picked
-            // window's app's. Only while the Mac sent some, and where the bar holds it: with none the
-            // strip takes its room back.
-            if client.menus.hasMenus, menusFit {
-                MacMenuButton(client: client, width: metrics.buttonWidth, height: metrics.buttonHeight,
-                              spacing: metrics.buttonSpacing, onOpen: menusOpened, onClose: menusClosed)
+            // Paste, in the Menus button's old place (Alexis, 2026-10-25): this device's clipboard
+            // typed on the Mac where its cursor is (`StreamClient.pasteFromDevice`). Where the bar
+            // holds it and still a whole thumbnail.
+            if menusFit {
+                button(open: false, symbol: "doc.on.clipboard", label: "Paste",
+                       accessibilityLabel: "Paste the clipboard on \(client.macName.isEmpty ? "the Mac" : client.macName)",
+                       action: { client.pasteFromDevice() })
                     .opacity(scaleOpen ? 0 : 1)    // under the Aa ruler, as the buttons after Aa
                     .allowsHitTesting(!scaleOpen)
-                    .transition(.opacity)
             }
 
             // Text size: the host sizes the Mac window to the panel divided by this scale, so a
@@ -1728,25 +1795,28 @@ struct WindowMenuAnchorKey: PreferenceKey {
 struct WindowLightsMenu: View {
     let anchor: Anchor<CGRect>
     let window: WindowInfo
+    /// The Mac quits a window's app (`WindowList.windowQuit`): a fourth button, asked first.
+    var canQuit = false
     let command: (WindowCommand.Action) -> Void
     let dismiss: () -> Void
     /// Whether a screen of this size always puts the lights below the thumbnail (the phone's
     /// arrangement); otherwise they go on the side of the screen's middle away from it.
     var alwaysBelow: (CGSize) -> Bool = { _ in false }
 
-    private static let size = CGSize(width: 214, height: 62)
+    private var size: CGSize { CGSize(width: canQuit ? 280 : 214, height: 62) }
+    @State private var confirmQuit = false
     /// The Duo's hinge (iOS 27.1): the lights keep off its fold.
     @Environment(\.duoEnvironment) private var duoEnvironment
 
     var body: some View {
         GeometryReader { proxy in
             let frame = proxy[anchor]
-            let w = Self.size.width, h = Self.size.height
+            let w = size.width, h = size.height
             // Off the Duo's fold (iOS 27.1): onto a page beside it, below the thumbnail when above it
             // would sit on it; elsewhere as before.
             let at = DuoPosture.lightsMenu(x: min(max(frame.midX, w / 2 + 8), proxy.size.width - w / 2 - 8),
                                            below: alwaysBelow(proxy.size) || frame.midY < proxy.size.height / 2,
-                                           thumbnail: frame, size: Self.size, gap: 8, screenWidth: proxy.size.width,
+                                           thumbnail: frame, size: size, gap: 8, screenWidth: proxy.size.width,
                                            fold: DuoPosture.read(proxy, duoEnvironment).info(in: proxy.size))
             let below = at.below, x = at.x, y = at.y
             ZStack {
@@ -1755,6 +1825,25 @@ struct WindowLightsMenu: View {
                     light(.close, Color(hex: 0xFF5F57), "xmark", "Close")
                     light(.minimize, Color(hex: 0xFEBC2E), "minus", "Minimize")
                     light(.fullScreen, Color(hex: 0x28C840), "arrow.up.left.and.arrow.down.right", "Full Screen")
+                    if canQuit {
+                        Button { confirmQuit = true } label: {
+                            VStack(spacing: 5) {
+                                ZStack {
+                                    Circle().fill(Color.white.opacity(0.85)).frame(width: 24, height: 24)
+                                    Image(systemName: "power")
+                                        .font(.system(size: 11, weight: .heavy))
+                                        .foregroundStyle(.black.opacity(0.7))
+                                }
+                                Text("Quit")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(Palette.barLabel)
+                                    .lineLimit(1)
+                            }
+                            .frame(width: 60)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Quit \(window.appName)")
+                    }
                 }
                 .padding(.horizontal, 10)
                 .frame(width: w, height: h)
@@ -1769,6 +1858,12 @@ struct WindowLightsMenu: View {
                 .transition(.scale(scale: 0.8, anchor: below ? .top : .bottom).combined(with: .opacity))
             }
             .accessibilityLabel("\(window.appName) window actions")
+            .alert("Quit \(window.appName)?", isPresented: $confirmQuit) {
+                Button("Quit", role: .destructive) { command(.quit) }
+                Button("Cancel", role: .cancel, action: dismiss)
+            } message: {
+                Text("\(window.appName) quits on the Mac, as with ⌘Q. A document not yet saved still asks there.")
+            }
         }
     }
 

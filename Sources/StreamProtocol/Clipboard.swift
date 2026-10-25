@@ -37,4 +37,8 @@ public struct Clipboard: Codable, Hashable, Sendable {
     /// `maxOtherHostPayload`): JSON writes a control character as six bytes, so 256 KB of text can
     /// be more than 1 MiB as JSON, and then it is not sent.
     public static let maxTextBytes = 256 * 1024
+
+    /// The most image a device sends: 700 KB, whose base64 in JSON stays under the host's 1 MiB cap
+    /// on a device's message (`ClipboardPolicy.maxPayload`).
+    public static let maxImageBytes = 700 * 1024
 }
