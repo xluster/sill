@@ -48,6 +48,7 @@ struct RemoteAccessPane: View {
     @State private var portSaved = false
     @State private var nameText: String?
     @State private var nameProblem: String?
+    @FocusState private var nameFocused: Bool
 
     private var available: Bool { status.identityProblem == nil }
     private var on: Bool { remoteAccess && available }
@@ -294,12 +295,23 @@ struct RemoteAccessPane: View {
                       prompt: Text("home.example.net"))
                 .labelsHidden()
                 .frame(width: 220)
+                .focused($nameFocused)
                 .onSubmit { saveAddressName() }
+                // Return saves, and so does leaving the field: a click elsewhere, Tab, another tab
+                // or closing Settings, which before kept what was typed on screen and saved nothing.
+                .onChange(of: nameFocused) { _, focused in if !focused { saveEditedAddressName() } }
+                .onDisappear { saveEditedAddressName() }
         } label: {
             Text("Address name (optional)")
             Text("If your router has a dynamic DNS name, enter it so your devices keep finding this Mac when your internet address changes. Add :port if the router forwards a different outside port.")
         }
         if let nameProblem { Warning(nameProblem) }
+    }
+
+    /// Saves only what was typed and not saved yet.
+    private func saveEditedAddressName() {
+        guard let nameText, nameText.trimmingCharacters(in: .whitespacesAndNewlines) != addressName else { return }
+        saveAddressName()
     }
 
     private func saveAddressName() {
