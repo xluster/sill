@@ -367,8 +367,9 @@ check("kind 23 is hello (update-notice); 24, 25 and 27 the Mac's menus; 26 the M
       header(23)?.kind == .hello && header(24)?.kind == .macMenu && header(25)?.kind == .pressMenuItem
       && header(27)?.kind == .fetchMenu && header(26)?.kind == .macPointer)
 check("kind 28 is gesture (trackpad gestures), 29 unknown (skipped)", header(28)?.kind == .gesture && header(29)?.kind == .unknown)
-check("kind 32 is the clipboard, 33 the text focus; 29, 30, 31 and 34 unknown (skipped)",
-      header(32)?.kind == .clipboard && header(33)?.kind == .textFocus && [29, 30, 31, 34].allSatisfy { header(UInt8($0))?.kind == .unknown })
+check("kind 32 is the clipboard, 33 the text focus, 34 the capture, 35 a file, 36 night mode; 29, 30, 31 and 37 unknown (skipped)",
+      header(32)?.kind == .clipboard && header(33)?.kind == .textFocus && header(34)?.kind == .captureRegion && header(35)?.kind == .file && header(36)?.kind == .night
+        && [29, 30, 31, 37].allSatisfy { header(UInt8($0))?.kind == .unknown })
 check("kinds 16 and 17 unchanged", header(16)?.kind == .hostSettings && header(17)?.kind == .changeSettings)
 check("caps: 1 MiB client, 4 KiB pairing, 32 MiB frames, 4 MiB other",
       StreamMessage.maxClientPayload == 1_048_576 && StreamMessage.maxPairingPayload == 4096
@@ -462,6 +463,26 @@ check("TLS: an ALPN the host does not offer — refused (\(r.box.lines.joined(se
 check("floor: every host offers sill/1 and sill-pair/1 (\(RemoteTLS.serverALPNs))",
       RemoteTLS.serverALPNs.contains("sill/1") && RemoteTLS.serverALPNs.contains("sill-pair/1"))
 check("floor: the two names never change", RemoteTLS.sessionALPN == "sill/1" && RemoteTLS.pairingALPN == "sill-pair/1")
+
+// Kind 35, a file in parts (FilePart.swift).
+do {
+    let part = FilePart(id: "A1", name: "report.pdf", size: 10, offset: 4)
+    let payload = part.payload(with: Data([1, 2, 3]))
+    let back = FilePart.read(payload)
+    check("a file part round-trips with its bytes", back?.part == part && back?.bytes == Data([1, 2, 3]))
+    check("bytes past the file's end are refused",
+          FilePart.read(FilePart(id: "A1", name: "x", size: 5, offset: 4).payload(with: Data([1, 2]))) == nil)
+    check("a payload too short or with a bad header is refused",
+          FilePart.read(Data([0, 0])) == nil && FilePart.read(Data([0, 0, 0, 9, 1, 2])) == nil)
+    check("a file over the largest size is refused",
+          FilePart.read(FilePart(id: "A", name: "x", size: FilePart.maxFileBytes + 1, offset: 0).payload(with: Data([1]))) == nil)
+    check("a whole part stays under the host's cap",
+          FilePart(id: UUID().uuidString, name: String(repeating: "n", count: 200), size: FilePart.maxFileBytes, offset: 0)
+            .payload(with: Data(count: FilePart.partBytes)).count <= StreamMessage.maxClientPayload)
+    check("names are made safe: \(FilePart.safeName("../../.ssh/id"))",
+          FilePart.safeName("../../.ssh/id") == "id" && FilePart.safeName(".hidden") == "hidden"
+            && FilePart.safeName("a:b\u{0}c.txt") == "abc.txt" && FilePart.safeName("") == "File" && FilePart.safeName("Photo 1.HEIC") == "Photo 1.HEIC")
+}
 
 print(fails == 0 ? "ALL PASS (\(passes) checks)" : "\(fails) FAILED of \(passes + fails)")
 exit(Int32(min(fails, 100)))

@@ -121,6 +121,22 @@ final class SessionLink {
         if current != nil, Self.isInput(data) { inputs += 1 }
     }
 
+    /// `send`, with `done` called once the connection has taken the bytes (a file's parts are paced by
+    /// it); false, and `done` never called, with no connection. Kept, in order, while a fence or a hold
+    /// stands, and then `done` at once.
+    @discardableResult
+    func send(_ data: Data, done: @escaping @Sendable () -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if !fences.isEmpty || holding != nil {
+            waiting.append(data)
+            DispatchQueue.global().async(execute: done)
+            return true
+        }
+        guard let current else { return false }
+        current.send(content: data, completion: .contentProcessed { _ in done() })
+        return true
+    }
+
     /// Whether `c` is still read: the session's connection, or the old one of a hand-over until its
     /// fence has come back (its pong sits behind whatever the Mac had queued on it).
     func reads(_ c: NWConnection) -> Bool {

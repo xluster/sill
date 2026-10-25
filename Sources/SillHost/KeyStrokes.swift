@@ -203,7 +203,8 @@ package struct KeyStrokes: Sendable {
         0x31: 42,   // \
         0x33: 41,   // ;
         0x34: 39,   // '
-        0x35: 50,   // `
+        0x35: 50,   // ` (on an ISO keyboard, the key beside left shift: < > on a French Mac)
+        0x64: 10,   // ISO section, the key left of 1 (@ # on a French Mac): MacBook mode's AZERTY keys
         0x36: 43,   // ,
         0x37: 47,   // .
         0x38: 44,   // /

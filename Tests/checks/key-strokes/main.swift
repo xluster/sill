@@ -205,7 +205,8 @@ check(KeyStrokes.flags(fromDevice: (1 << 21) | (1 << 24) | 0xFFFF | (1 << 23)) =
 check(KeyStrokes.flags(fromDevice: 0x1F_0000 | (1 << 21)) == capsLock | modifierBits, "all five, nothing else")
 check(command == 0x10_0000 && shift == 0x02_0000 && control == 0x04_0000 && option == 0x08_0000 && capsLock == 0x01_0000,
       "CGEventFlags' masks")
-check(KeyStrokes.virtualKeys.count == 82, "82 keys a device can send, as before (got \(KeyStrokes.virtualKeys.count))")
+check(KeyStrokes.virtualKeys.count == 83, "83 keys a device can send: as before, and the ISO key left of 1 (got \(KeyStrokes.virtualKeys.count))")
+check(KeyStrokes.virtualKeys[0x64] == 10, "the ISO key left of 1 is kVK_ISO_Section (@ # on a French Mac)")
 let modifierKeycodes: [(UInt16, UInt16)] = [(uLCtrl, 59), (uLShift, 56), (uLOpt, 58), (uLCmd, 55), (uRCtrl, 62), (uRShift, 60), (uROpt, 61), (uRCmd, 54)]
 check(modifierKeycodes.allSatisfy { KeyStrokes.virtualKeys[$0.0] == $0.1 }, "the eight modifier keys' keycodes")
 check(KeyStrokes.virtualKeys[uSpace] == kSpace && KeyStrokes.virtualKeys[uEsc] == kEsc && KeyStrokes.virtualKeys[0x04] == 0

@@ -80,6 +80,14 @@ public enum StreamMessageKind: UInt8 {
     case textFocus = 33      // host → device: JSON TextFocus — the Mac's focus went into or out of a place that
                              // takes text, so the device can bring its keyboard up by itself; on each change, and
                              // to every device once more when one connects
+    // A framed area of the picture to put on the Mac's clipboard (CaptureRegion.swift); only to a host
+    // whose window list says `captureRegion` 1. Older hosts map it to `.unknown` and skip it.
+    case captureRegion = 34  // device → host: JSON CaptureRegion — that part of the last picture, as a PNG, on
+                             // the Mac's clipboard
+    // A file from the device, in parts (FilePart.swift); only to a host whose window list says `files` 1.
+    case file = 35           // device → host: binary FilePart — kept in Downloads, put on the Mac's clipboard
+    // Night mode (Night.swift); only to a host whose window list says `night` 1.
+    case night = 36          // device → host: JSON Night — the built-in display's brightness at its lowest, or back
     case unknown = 255       // never sent: what parseHeader yields for a kind this build does not know
 }
 

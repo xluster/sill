@@ -276,6 +276,28 @@ package final class StreamCoordinator {
     private let displayWake = DisplayWake()
     /// Whether the Mac's keyboard focus takes text, sent to the devices as kind 33 (TextFocusWatch).
     private let textFocus = TextFocusWatch()
+    /// Files from devices (kind 35): into Downloads, then onto the clipboard. A synthetic host keeps
+    /// them in SILL_TEST_FILES_DIR (TEST ONLY), else in a folder of its own under the temporary one,
+    /// never in this Mac's Downloads.
+    private lazy var files: FileReceiver = {
+        let fm = FileManager.default
+        let folder: URL
+        if synthetic {
+            folder = ProcessInfo.processInfo.environment["SILL_TEST_FILES_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? fm.temporaryDirectory.appendingPathComponent("sill-test-downloads", isDirectory: true)
+        } else {
+            folder = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        }
+        let receiver = FileReceiver(folder: folder)
+        receiver.onFile = { [weak self] url, _ in
+            Task { @MainActor in
+                self?.clipboard.put(file: url)
+                Stats.shared.bump("file.recv")
+            }
+        }
+        return receiver
+    }()
     /// The source whose capture the display's sleep stopped while a device watched: restarted
     /// once the display is on again (`captureStopped`, `resumeAfterDisplaySleep`). Cleared by a
     /// device's pick and by the last device leaving.
@@ -415,6 +437,7 @@ package final class StreamCoordinator {
                 if self.flipWait == id { self.flipWait = nil }
                 self.menus.clientLeft(connection)
                 self.clipboard.clientLeft(connection)
+                self.files.clientLeft(connection)
                 self.releaseKeys(of: id)
                 self.status.update { $0.devices.removeAll { $0.id == id } }
                 // The last device at home left devices away behind: the away quality, at once.
@@ -1068,6 +1091,33 @@ package final class StreamCoordinator {
             // The clipboard (HostClipboard): a subscription, a device's text, or its stop. No `await`:
             // it reads and writes the pasteboard at once, and says nothing per copy.
             clipboard.received(message.payload, from: connection, who: deviceName(connection))
+        case .night:
+            // Night mode: the built-in display dims to its lowest, or comes back. A synthetic host
+            // never touches this Mac's brightness.
+            guard let night = Wire.decode(Night.self, from: message.payload) else { return }
+            if synthetic {
+                print("Night mode \(night.on ? "on" : "off") from \(deviceName(connection)) (not applied: a test host).")
+            } else {
+                print("\(MacBrightness.setNight(night.on)) (\(deviceName(connection)))")
+            }
+        case .file:
+            // A part of a file from a device (FileReceiver): written in order off the main actor.
+            files.received(message.payload, from: connection, who: deviceName(connection))
+        case .captureRegion:
+            // An area of the picture a device framed: that part of the last frame, as a PNG, on the
+            // Mac's clipboard. Nothing streaming, or a region with nothing in it: refused, one line.
+            let who = deviceName(connection)
+            guard let region = Wire.decode(CaptureRegion.self, from: message.payload)?.clamped,
+                  let frame = encoder?.latestPicture() else {
+                print("Capture from \(who): nothing to capture.")
+                return
+            }
+            RegionCapture.png(of: frame, region: region) { [weak self] png, size in
+                guard let self, let png else { print("Capture from \(who): the picture could not be cut."); return }
+                self.clipboard.put(image: png)
+                Stats.shared.bump("clip.capture")
+                print("Capture from \(who): \(Int(size.width))×\(Int(size.height)) px on the clipboard.")
+            }
         case .pressMenuItem:
             guard let r = Wire.decode(PressMenuItem.self, from: message.payload) else { return }
             // One of the Mac's menu items chosen from a device acts as a click on it would, and may
@@ -2407,7 +2457,7 @@ package final class StreamCoordinator {
                       payload: Wire.encode(WindowList(macName: macName, windows: catalog.infos, active: active, launchID: launchID,
                                                       hostVersion: hostVersion, protocol: SillProtocol.current,
                                                       gestures: TrackpadGesture.generation, clipboard: clipboard.advertised,
-                                                      windowQuit: 1)))
+                                                      windowQuit: 1, captureRegion: 1, files: FilePart.generation, night: 1)))
     }
 
     private func broadcastList() { server.broadcast(listMessage()) }

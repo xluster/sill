@@ -795,6 +795,18 @@ final class StreamClient: ObservableObject {
     /// Whether this session's Mac quits a window's app from the bar's long press
     /// (`WindowList.windowQuit`). Cleared with the session.
     @Published var hostWindowQuit = false
+    /// Whether this session's Mac puts a framed area of the picture on its clipboard (kind 34,
+    /// `WindowList.captureRegion`). Cleared with the session.
+    @Published var hostCaptures = false
+    /// Whether this session's Mac takes files (kind 35, `WindowList.files`). Cleared with the session.
+    @Published var hostFiles = false
+    /// Whether this session's Mac takes night mode (kind 36, `WindowList.night`). Cleared with the session.
+    @Published var hostNight = false
+    /// The file going to the Mac, or the last one's outcome for a moment (StreamClient+Files).
+    @Published var fileSend: FileSend?
+    /// The ping whose pong says the Mac has read a file's last part.
+    var fileNonce: Data?
+    var fileReceipt: DispatchSemaphore?
     /// The clipboard (kind 32, StreamClient+Clipboard, docs/clipboard-plan.md): what this session's
     /// Mac takes and sends (`WindowList.clipboard`, 1 for text), nil from a Mac before it or with Share
     /// clipboard with devices off. Cleared with the session.
@@ -3135,6 +3147,9 @@ final class StreamClient: ObservableObject {
         hostProtocol = nil
         hostGestures = nil
         hostWindowQuit = false
+        hostCaptures = false
+        hostFiles = false
+        hostNight = false
         remoteRoute = nil
         macInfo = nil
         macInfoSaved = false
@@ -3205,6 +3220,19 @@ final class StreamClient: ObservableObject {
         // Layout harness (mock, no connection): show the pick locally so taps can be checked.
         if connection == nil { DispatchQueue.main.async { self.active = source } }
         #endif
+    }
+
+    /// A message whose bytes the connection takes before `done` (a file's parts); false with none.
+    func sendPaced(_ kind: StreamMessageKind, payload: Data, done: @escaping @Sendable () -> Void) -> Bool {
+        let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970, isKeyframe: false, payload: payload)
+        return link.send(message.serialized(), done: done)
+    }
+
+    /// The side keys' capture: that area of the picture onto the Mac's clipboard (kind 34).
+    func captureRegion(_ region: CaptureRegion) {
+        guard hostCaptures else { return }
+        noteAction()
+        send(.captureRegion, Wire.encode(region))
     }
 
     /// The bar's long-press menu: close, minimize or full-screen a window on the Mac.
@@ -3649,6 +3677,12 @@ final class StreamClient: ObservableObject {
                 if self.hostGestures != list.gestures { self.hostGestures = list.gestures }
                 let quits = (list.windowQuit ?? 0) >= 1
                 if self.hostWindowQuit != quits { self.hostWindowQuit = quits }
+                let captures = (list.captureRegion ?? 0) >= 1
+                if self.hostCaptures != captures { self.hostCaptures = captures }
+                let files = (list.files ?? 0) >= 1
+                if self.hostFiles != files { self.hostFiles = files }
+                let night = (list.night ?? 0) >= 1
+                if self.hostNight != night { self.hostNight = night }
                 // The clipboard: subscribe (or stop) as the Mac's word and this device's switch say.
                 self.hostClipboardChanged(list.clipboard)
                 if !self.sessionListed {

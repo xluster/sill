@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import Combine
 import StreamProtocol
 
@@ -145,6 +146,23 @@ struct StreamScreen: View {
     /// stays in view (Alexis, 2026-10-25); the viewport keeps the size from before, so the Mac's
     /// window is not resized each time the keyboard comes and goes.
     @State private var keyboardCover: CGFloat = 0
+    /// The landscape side keys (SideKeyBar): folded to a pill by the person, kept across launches;
+    /// unfolded by a Mac text field gaining focus, and folded again when it loses it if that unfolded it.
+    @AppStorage("Sill.keysFolded") private var keysFolded = false
+    @State private var keysOpenedForField = false
+    @State private var landscapeNow = false
+    /// The side keys' capture: the finger frames an area of the picture (RegionPicker).
+    @State private var regionPicking = false
+    /// MacBook mode (MacBookMode.swift): shut, the cover shows the closed lid.
+    @AppStorage(MacBookMode.key) private var macBookMode = false
+    /// Night mode (NightMode): the Mac's display and this screen at their lowest.
+    @AppStorage(NightMode.key) private var nightOn = false
+    /// The side keys' file: where it comes from (a choice), then the system's pickers.
+    @State private var fileChoice = false
+    @State private var fileImporter = false
+    @State private var photoPicker = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @StateObject private var dictation = Dictation()
     /// The keyboard is up because the Mac's focus went into a text field (`client.macTextFocus`), so
     /// it goes down by itself when the focus leaves; one the person brought up stays.
     @State private var keyboardForTextField = false
@@ -259,6 +277,12 @@ struct StreamScreen: View {
                         portrait(metrics: DuoLayout.phoneArrangement ? .phone : .compact, largerKeyboard: largerKeyboard)
                     }
                 }
+                .overlay {
+                    // MacBook mode with the Duo shut: the cover is the closed lid, over the stream.
+                    if macBookMode, posture.hinge == .closed {
+                        MacBookLid().transition(.opacity)
+                    }
+                }
                 // Under the pairing overlay and the tour nothing takes a touch: not the bar, and
                 // not the stream's UIKit input view (nor, so, the Pencil, a hover or a key).
                 .allowsHitTesting(!overlayShown && tour == nil)
@@ -266,6 +290,7 @@ struct StreamScreen: View {
                 // laptop layout, and a rotation re-renders it at once; the Mac's arrow stays.
                 .onChange(of: DuoLayout.of(geo.size).isPortrait, initial: true) { _, portrait in
                     client.setPointerLayout(portrait: portrait)
+                    landscapeNow = !portrait
                 }
                 // The clipboard's chip on screen or not: its 20 s run only while it is, and VoiceOver
                 // is told when it first shows (ClipboardPolicy.chipCounts).
@@ -367,9 +392,63 @@ struct StreamScreen: View {
         // A text field focused on the Mac brings the keyboard up, as on the phone itself (Alexis,
         // 2026-10-25), unless a hardware keyboard types or something is open over the stream; the
         // focus leaving takes down only a keyboard it brought.
+        // The side keys' file (Alexis, 2026-10-25): Files or Photos, the system's own pickers, then
+        // each file to the Mac one after another (StreamClient+Files).
+        .confirmationDialog("Send to \(client.macName.isEmpty ? "the Mac" : client.macName)", isPresented: $fileChoice,
+                            titleVisibility: .visible) {
+            Button("Files") { fileImporter = true }
+            Button("Photos") { photoPicker = true }
+            Button("Cancel", role: .cancel) {}
+        }
+        .fileImporter(isPresented: $fileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            for url in urls { client.sendFile(at: url, scoped: true) }
+        }
+        .photosPicker(isPresented: $photoPicker, selection: $photoItems, maxSelectionCount: 20,
+                      preferredItemEncoding: .current)
+        #if DEBUG
+        // DEBUG `-SillSendFileAt <s>`: a 1.3 MB file of its own sent to the Mac s seconds in, as the
+        // side keys' Files would (a test host's SILL_TEST_FILES_DIR keeps it).
+        .task {
+            guard let wait = Double(UserDefaults.standard.string(forKey: "SillSendFileAt") ?? "") else { return }
+            try? await Task.sleep(for: .seconds(wait))
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sill-debug", isDirectory: true)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let url = folder.appendingPathComponent("Test file.bin")
+            try? Data((0..<1_300_000).map { UInt8(truncatingIfNeeded: $0 &* 31) }).write(to: url)
+            client.sendFile(at: url)
+        }
+        #endif
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            photoItems = []
+            for item in items {
+                Task {
+                    if let picked = try? await item.loadTransferable(type: PickedFile.self) {
+                        client.sendFile(at: picked.url, cleanup: true)
+                    } else if UIDevice.current.userInterfaceIdiom == .phone {
+                        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                    }
+                }
+            }
+        }
         .onChange(of: client.macTextFocus) { _, editable in
             let free = !HardwareKeyboardMonitor.shared.attached && tour == nil && !overlayShown
                 && !settingsOpen && !drawerOpen
+            // Sideways the side keys offer the choice instead: the keyboard or the microphone
+            // (Alexis, 2026-10-25), so the picture stays whole until one is picked.
+            if landscapeNow {
+                if editable, free, keysFolded {
+                    withAnimation(.spring(duration: 0.3, bounce: 0.15)) { keysFolded = false }
+                    keysOpenedForField = true
+                } else if !editable, keysOpenedForField, !keyboardShown, !dictation.listening, dictation.heard.isEmpty {
+                    withAnimation(.spring(duration: 0.3, bounce: 0.15)) { keysFolded = true }
+                    keysOpenedForField = false
+                }
+                return
+            }
+            // MacBook mode: the deck is the keyboard.
+            if macBookMode { return }
             if editable, free, !keyboardShown {
                 overlay.setKeyboard(shown: true)
                 keyboardForTextField = true
@@ -1122,6 +1201,15 @@ struct StreamScreen: View {
                              onModifiersConsumed: { latched = [] },
                              sendGesture: { client.sendGesture($0, fingers: $1) },
                              zoom: client.pictureZoom)
+                if regionPicking {
+                    RegionPicker(videoSize: client.videoSize, zoom: client.pictureZoom,
+                                 cancel: { withAnimation(.easeOut(duration: 0.2)) { regionPicking = false } },
+                                 pick: { region in
+                                     client.captureRegion(region)
+                                     withAnimation(.easeOut(duration: 0.2)) { regionPicking = false }
+                                 })
+                        .transition(.opacity)
+                }
             }
             .background(Palette.panel)
             .overlay(alignment: .top) { LinkLineView(text: shownLinkLine) }
@@ -1191,8 +1279,712 @@ struct StreamScreen: View {
                 .frame(maxWidth: .infinity, alignment: .center)
                 .transition(.opacity)
             }
+
+            // The side keys (Alexis, 2026-10-25): over the picture, bar shown or not, kept above the
+            // keyboard when it is up. The Mac keyboard's own keys the software one lacks, the
+            // keyboard's show and hide, the microphone (dictation with no keyboard, the picture left
+            // whole) and Paste; folded by its own chevron to a pill, which the finger drags anywhere
+            // and which settles against the nearer side, where they then open.
+            if !drawerOpen, !settingsOpen, !regionPicking, barTab != nil {
+                SideKeysDock(folded: keysFolded, keyboardCover: keyboardCover, dictation: dictation, fileSend: client.fileSend,
+                             fold: {
+                                 keysOpenedForField = false
+                                 withAnimation(.spring(duration: 0.35, bounce: 0.2)) { keysFolded = true }
+                             }) {
+                    SideKeyBar(latched: $latched,
+                               dictation: dictation,
+                               keyboardShown: keyboardShown,
+                               send: { client.sendInput($0) },
+                               toggleKeyboard: { overlay.toggleKeyboard() },
+                               paste: { client.pasteFromDevice() },
+                               nightOn: nightOn,
+                               toggleNight: { NightMode.apply(!nightOn, client: client) },
+                               sendFile: client.hostFiles ? { fileChoice = true } : nil,
+                               capture: client.hostCaptures ? {
+                                   overlay.setKeyboard(shown: false)
+                                   withAnimation(.easeOut(duration: 0.2)) { regionPicking = true }
+                               } : nil)
+                } pill: { lifted in
+                    SideKeysPill(listening: dictation.listening, lifted: lifted,
+                                 open: { withAnimation(.spring(duration: 0.35, bounce: 0.2)) { keysFolded = false } })
+                }
+                .onAppear { dictation.onText = { client.typeOnMac($0) } }
+            }
         }
+        .animation(.easeOut(duration: 0.18), value: keyboardShown)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - The side keys
+
+/// The landscape stream's side keys, laid out as a corner of a Mac keyboard: the handle (fold
+/// and move); the software keyboard (lit while up), the microphone (red while listening) and the
+/// iPhone's Paste; the Mac's cut, copy and paste; select all, and an area of the picture captured
+/// to the Mac's clipboard; esc, tab and backspace (held, it repeats); control, option, command;
+/// shift and a wide return; the arrows as the inverted T, up and down half height between left and
+/// right. Modifiers latch as the portrait key row's do (`latched`, shared with the input overlay,
+/// so ⌘ then c on the keyboard is ⌘C); a key spends them.
+private struct SideKeyBar: View {
+    @Binding var latched: KeyModifiers
+    @ObservedObject var dictation: Dictation
+    let keyboardShown: Bool
+    let send: (InputEvent) -> Void
+    let toggleKeyboard: () -> Void
+    /// The bar's Paste: the iPhone's clipboard typed on the Mac, or its image pasted there.
+    let paste: () -> Void
+    /// Night mode, the moon at the handle's left.
+    let nightOn: Bool
+    let toggleNight: () -> Void
+    /// Sends a file from Files or Photos to the Mac; nil from a Mac that takes none.
+    let sendFile: (() -> Void)?
+    /// Frames an area of the picture for the Mac's clipboard; nil from a Mac that takes none.
+    let capture: (() -> Void)?
+
+    static let unit: CGFloat = 40                // one cap's width
+    private static let height: CGFloat = 34      // one cap's height
+    static let gap: CGFloat = 5
+    static var width: CGFloat { unit * 3 + gap * 2 }
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // The handle: SideKeysDock lays its tap (fold) and drag (move) over its middle; the moon
+            // at its left is night mode.
+            ZStack {
+                Image(systemName: "chevron.compact.down")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Palette.muted)
+                    .accessibilityHidden(true)
+                Button(action: toggleNight) {
+                    Image(systemName: nightOn ? "moon.fill" : "moon")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(nightOn ? Color(hex: 0xFEBC2E) : Palette.muted)
+                        .frame(width: 30, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(KeyPress())
+                .accessibilityLabel(nightOn ? "Night mode, on" : "Night mode")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: Self.width, height: 20)
+
+            HStack(spacing: Self.gap) {
+                action(keyboardShown ? "keyboard.chevron.compact.down" : "keyboard",
+                       on: keyboardShown, tint: Palette.accent, ink: Color.black.opacity(0.85),
+                       label: keyboardShown ? "Hide the keyboard" : "Show the keyboard", action: toggleKeyboard)
+                action("mic.fill", on: dictation.listening, tint: Color(hex: 0xFF453A), ink: .white,
+                       label: dictation.listening ? "Stop dictating" : "Dictate on the Mac", action: dictation.toggle)
+                action("iphone.and.arrow.forward", on: false, tint: Palette.accent, ink: Color.black.opacity(0.85),
+                       label: "Paste the iPhone's clipboard on the Mac") { haptic.impactOccurred(intensity: 0.5); paste() }
+            }
+
+            // The Mac's own cut, copy and paste: ⌘X, ⌘C, ⌘V there, its clipboard, not the iPhone's.
+            HStack(spacing: Self.gap) {
+                key(width: Self.unit, label: "Cut on the Mac", action: { shortcut(0x1B) }) { glyph("cut", "scissors") }
+                key(width: Self.unit, label: "Copy on the Mac", action: { shortcut(0x06) }) { glyph("copy", "doc.on.doc") }
+                key(width: Self.unit, label: "Paste on the Mac", action: { shortcut(0x19) }) { glyph("paste", "doc.on.clipboard") }
+            }
+            HStack(spacing: Self.gap) {
+                key(width: Self.unit, label: "Select all on the Mac", action: { shortcut(0x04) }) {
+                    glyph("all", "selection.pin.in.out")
+                }
+                key(width: Self.unit, label: "Capture an area to the Mac's clipboard", action: { capture?() }) {
+                    glyph("capture", "camera.viewfinder")
+                }
+                .disabled(capture == nil)
+                .opacity(capture == nil ? 0.35 : 1)
+                key(width: Self.unit, label: "Send a file to the Mac", action: { sendFile?() }) {
+                    glyph("file", "arrow.up.doc")
+                }
+                .disabled(sendFile == nil)
+                .opacity(sendFile == nil ? 0.35 : 1)
+            }
+
+            Rectangle().fill(Color.white.opacity(0.08)).frame(width: Self.width, height: 1)
+
+            VStack(spacing: Self.gap) {
+                HStack(spacing: Self.gap) {
+                    key(width: Self.unit, label: "Escape", action: { type(HIDKey.escape) }) { glyph("esc", "escape") }
+                    key(width: Self.unit, label: "Tab", action: { type(HIDKey.tab) }) { glyph("tab", "arrow.right.to.line") }
+                    RepeatKey(label: "Delete", fire: { type(HIDKey.deleteBackward) }) {
+                        face(width: Self.unit, height: Self.height) { glyph("delete", "delete.left") }
+                    }
+                }
+                HStack(spacing: Self.gap) {
+                    modifier("control", "control", .control, "Control")
+                    modifier("option", "option", .option, "Option")
+                    modifier("command", "command", .command, "Command")
+                }
+                HStack(spacing: Self.gap) {
+                    modifier("shift", "shift", .shift, "Shift")
+                    key(width: Self.unit * 2 + Self.gap, label: "Return", action: { type(HIDKey.returnKey) }) { glyph("return", "return") }
+                }
+            }
+
+            HStack(alignment: .bottom, spacing: Self.gap) {
+                arrow("arrowtriangle.left.fill", HIDKey.leftArrow, "Left arrow", height: Self.height)
+                VStack(spacing: 3) {
+                    arrow("arrowtriangle.up.fill", HIDKey.upArrow, "Up arrow", height: (Self.height - 3) / 2)
+                    arrow("arrowtriangle.down.fill", HIDKey.downArrow, "Down arrow", height: (Self.height - 3) / 2)
+                }
+                arrow("arrowtriangle.right.fill", HIDKey.rightArrow, "Right arrow", height: Self.height)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+        .sideKeysBackground(cornerRadius: 20, morphs: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Mac keys")
+    }
+
+
+    /// A Mac keycap's face: the symbol, its name under it.
+    private func glyph(_ name: String, _ symbol: String) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: symbol).font(.system(size: 12.5, weight: .medium))
+            Text(name).font(.system(size: 8.5, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
+        }
+    }
+
+    /// The three actions above the keys: rounder, and lit in their own colour while on.
+    private func action(_ symbol: String, on: Bool, tint: Color, ink: Color, label: String,
+                        action: @escaping () -> Void) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        return Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .foregroundStyle(on ? ink : Palette.text)
+                .frame(width: Self.unit, height: 36)
+                .background(shape.fill(on ? tint : Color.white.opacity(0.15)))
+                .contentShape(shape)
+                .animation(.easeOut(duration: 0.15), value: on)
+        }
+        .buttonStyle(KeyPress())
+        .accessibilityLabel(label)
+    }
+
+    private func arrow(_ symbol: String, _ usage: UInt16, _ label: String, height: CGFloat) -> some View {
+        key(width: Self.unit, height: height, label: label, action: { type(usage) }) {
+            Image(systemName: symbol).font(.system(size: height < 30 ? 8 : 10, weight: .semibold))
+        }
+    }
+
+    private func modifier(_ name: String, _ symbol: String, _ flag: KeyModifiers, _ label: String,
+                          width: CGFloat = unit) -> some View {
+        let on = latched.contains(flag)
+        return key(width: width, on: on, label: on ? "\(label), held. Tap to release." : "\(label), hold for the next key",
+                   action: { haptic.impactOccurred(intensity: 0.5); latched.formSymmetricDifference(flag) }) {
+            glyph(name, on && flag == .shift ? "shift.fill" : symbol)
+        }
+    }
+
+    /// The Mac's ⌘ shortcut on this key, whatever is latched (the latch is spent).
+    private func shortcut(_ usage: UInt16) {
+        haptic.impactOccurred(intensity: 0.5)
+        KeyChord.press(usage, with: .command).forEach(send)
+        latched = []
+    }
+
+    /// Down and up, with whatever is latched; the latch is spent.
+    private func type(_ usage: UInt16) {
+        haptic.impactOccurred(intensity: 0.5)
+        KeyChord.press(usage, with: latched).forEach(send)
+        latched = []
+    }
+
+    private func key<Content: View>(width: CGFloat, height: CGFloat = height, on: Bool = false, label: String,
+                                    action: @escaping () -> Void, @ViewBuilder content: () -> Content) -> some View {
+        Button(action: action) { face(width: width, height: height, on: on, content: content) }
+            .buttonStyle(KeyPress())
+            .accessibilityLabel(label)
+            .animation(.easeOut(duration: 0.12), value: on)
+    }
+
+    /// A keycap's look, lit while its modifier is held.
+    private func face<Content: View>(width: CGFloat, height: CGFloat, on: Bool = false,
+                                     @ViewBuilder content: () -> Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return content()
+            .foregroundStyle(on ? Color.black.opacity(0.85) : Palette.text)
+            .frame(width: width, height: height)
+            .background(shape.fill(on ? Palette.accent : Color.white.opacity(0.09)))
+            .overlay(shape.strokeBorder(Color.white.opacity(on ? 0 : 0.06), lineWidth: 0.5))
+            .contentShape(shape)
+    }
+}
+
+/// The side keys folded: a pill that opens them (red while dictating). The finger drags it
+/// anywhere; it settles against the nearer side. Lifted while dragged.
+private struct SideKeysPill: View {
+    let listening: Bool
+    let lifted: Bool
+    let open: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: listening ? "mic.fill" : "keyboard")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(listening ? Color(hex: 0xFF5F57) : Palette.text)
+            Image(systemName: "chevron.compact.up")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Palette.muted)
+        }
+        .frame(width: 64, height: 42)
+        .sideKeysBackground(cornerRadius: 21, interactive: true, morphs: true)
+        .contentShape(Capsule())
+        .scaleEffect(lifted ? 1.12 : 1)
+        .shadow(color: .black.opacity(lifted ? 0.35 : 0), radius: 18, y: 10)
+        .animation(.spring(duration: 0.25, bounce: 0.3), value: lifted)
+        // A tap, not a Button: a drag that ends with the finger still on the pill opens nothing.
+        .onTapGesture(perform: open)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Show the Mac keys")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, open)
+    }
+}
+
+/// Where the side keys float: against the leading or the trailing side, at a height kept as a
+/// fraction of the room above the keyboard (0 the top, 1 the bottom), both kept across launches.
+/// The pill, and the open keys by their handle, drag anywhere and settle against the nearer side;
+/// the keys open from the pill, growing out of its corner, and keep inside the room.
+private struct SideKeysDock<Panel: View, Pill: View>: View {
+    let folded: Bool
+    let keyboardCover: CGFloat
+    @ObservedObject var dictation: Dictation
+    let fileSend: FileSend?
+    /// The open keys' handle, tapped.
+    let fold: () -> Void
+    @ViewBuilder let panel: () -> Panel
+    /// Given whether it is being dragged.
+    @ViewBuilder let pill: (Bool) -> Pill
+
+    @AppStorage("Sill.keysTrailing") private var trailing = true
+    @AppStorage("Sill.keysHeight") private var height: Double = 1
+    @State private var offset: CGSize = .zero
+    @State private var box = CGSize(width: 150, height: 290)
+    @State private var lifted = false
+    /// The pill and the open keys are one glass shape that morphs between the two (iOS 26).
+    @Namespace private var glass
+    private let margin: CGFloat = 12
+    private var morphs: Bool { if #available(iOS 26.0, *) { true } else { false } }
+
+    var body: some View {
+        GeometryReader { geo in
+            let room = CGSize(width: geo.size.width, height: max(0, geo.size.height - keyboardCover))
+            let upper = height < 0.5
+            let corner: UnitPoint = trailing ? (upper ? .topTrailing : .bottomTrailing) : (upper ? .topLeading : .bottomLeading)
+            VStack(alignment: trailing ? .trailing : .leading, spacing: 8) {
+                if !upper { FileBubble(send: fileSend); DictationBubble(dictation: dictation) }
+                if folded {
+                    pill(lifted)
+                        .gesture(dragging(room))
+                        .transition(morphs ? .opacity : .scale(scale: 0.4, anchor: corner).combined(with: .opacity))
+                } else {
+                    panel()
+                        // The handle along the top: a tap folds the keys, a drag moves them.
+                        .overlay(alignment: .top) {
+                            Color.clear
+                                .frame(width: 84, height: 28)
+                                .contentShape(Rectangle())
+                                .onTapGesture(perform: fold)
+                                .gesture(dragging(room))
+                                .accessibilityElement()
+                                .accessibilityLabel("Fold the Mac keys")
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityAction(.default, fold)
+                        }
+                        .scaleEffect(lifted ? 1.03 : 1)
+                        .animation(.spring(duration: 0.25, bounce: 0.3), value: lifted)
+                        .transition(morphs ? .opacity : .scale(scale: 0.25, anchor: corner).combined(with: .opacity))
+                }
+                if upper { DictationBubble(dictation: dictation); FileBubble(send: fileSend) }
+            }
+            .glassGroup()
+            .environment(\.sideKeysGlass, glass)
+            .fixedSize()
+            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { box = $0 })
+            .position(center(in: room))
+            .offset(offset)
+            .animation(.spring(duration: 0.35, bounce: 0.2), value: keyboardCover)
+        }
+    }
+
+    private func center(in room: CGSize) -> CGPoint {
+        let x = trailing ? room.width - margin - box.width / 2 : margin + box.width / 2
+        let travel = max(0, room.height - 2 * margin - box.height)
+        return CGPoint(x: x, y: margin + box.height / 2 + travel * height)
+    }
+
+    private func dragging(_ room: CGSize) -> some Gesture {
+        // In the window's space: the pill moves with the finger, and a gesture read in its own
+        // (moving) space would feed its motion back into the translation.
+        DragGesture(minimumDistance: 6, coordinateSpace: .global)
+            .onChanged { value in
+                if !lifted { lifted = true; UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
+                offset = value.translation
+            }
+            .onEnded { value in
+                let start = center(in: room)
+                let end = CGPoint(x: start.x + value.translation.width + value.predictedEndTranslation.width * 0.15,
+                                  y: start.y + value.translation.height + value.predictedEndTranslation.height * 0.15)
+                let travel = max(1, room.height - 2 * margin - box.height)
+                withAnimation(.spring(duration: 0.4, bounce: 0.25)) {
+                    trailing = end.x > room.width / 2
+                    height = min(1, max(0, Double((end.y - margin - box.height / 2) / travel)))
+                    offset = .zero
+                    lifted = false
+                }
+                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            }
+    }
+}
+
+/// A key that repeats while held, as backspace does on a keyboard: once on a tap, then, held,
+/// again after 0.42 s and every 0.07 s until the finger lifts or slides off.
+private struct RepeatKey<Face: View>: View {
+    let label: String
+    let fire: () -> Void
+    @ViewBuilder let face: () -> Face
+    @State private var pressed = false
+    @State private var timer: Timer?
+    @State private var repeated = false
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+
+    var body: some View {
+        face()
+            .scaleEffect(pressed ? 0.93 : 1)
+            .brightness(pressed ? 0.12 : 0)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+            // Never completes (its duration is out of reach): only the press and its end matter.
+            .onLongPressGesture(minimumDuration: 3600, maximumDistance: 12, perform: {}, onPressingChanged: pressing)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { fire() }
+            .onDisappear { timer?.invalidate(); timer = nil }
+    }
+
+    private func pressing(_ down: Bool) {
+        if down {
+            pressed = true
+            repeated = false
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 0.42, repeats: false) { _ in
+                repeated = true
+                beat()
+                timer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { _ in beat() }
+            }
+        } else {
+            pressed = false
+            timer?.invalidate()
+            timer = nil
+            if !repeated { beat() }
+        }
+    }
+
+    private func beat() {
+        haptic.impactOccurred(intensity: 0.45)
+        fire()
+    }
+}
+
+/// What dictation hears, beside the side keys, with Send under it (nothing reaches the Mac before)
+/// and Discard; or why it cannot listen.
+private struct DictationBubble: View {
+    @ObservedObject var dictation: Dictation
+
+    var body: some View {
+        if let problem = dictation.problem {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color(hex: 0xFEBC2E))
+                Text(problem).font(.system(size: 14, weight: .medium)).foregroundStyle(Palette.text)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: 280, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .sideKeysBackground(cornerRadius: 16)
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+        } else if dictation.listening || !dictation.heard.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 8) {
+                    Circle().fill(Color(hex: 0xFF5F57)).frame(width: 8, height: 8).padding(.top, 5)
+                        .opacity(dictation.listening ? 1 : 0.25)
+                    Text(dictation.heard.isEmpty ? "Listening…" : dictation.heard)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(dictation.heard.isEmpty ? Palette.muted : Palette.text)
+                        .lineLimit(5)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 8) {
+                    Button(action: dictation.discard) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Palette.text)
+                            .frame(width: 34, height: 32)
+                            .background(Circle().fill(Color.white.opacity(0.12)))
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(KeyPress())
+                    .accessibilityLabel("Discard the dictation")
+                    Button(action: dictation.send) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold))
+                            Text("Send").font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.black.opacity(0.85))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 32)
+                        .background(Capsule().fill(Palette.accent))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(KeyPress())
+                    .disabled(dictation.heard.isEmpty)
+                    .opacity(dictation.heard.isEmpty ? 0.45 : 1)
+                    .accessibilityLabel("Send the dictation to the Mac")
+                }
+            }
+            .padding(12)
+            .frame(width: 260)
+            .fixedSize(horizontal: false, vertical: true)
+            .sideKeysBackground(cornerRadius: 18)
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            .animation(.easeOut(duration: 0.15), value: dictation.heard)
+        }
+    }
+}
+
+/// A file going to the Mac, beside the side keys: its name and a bar while it goes, then where it
+/// went, or why it did not.
+private struct FileBubble: View {
+    let send: FileSend?
+
+    var body: some View {
+        if let send {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Image(systemName: icon(send.state))
+                        .foregroundStyle(tint(send.state))
+                    Text(title(send))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.text)
+                        .lineLimit(2)
+                }
+                if send.state == .sending {
+                    ProgressView(value: Double(send.sent), total: Double(max(send.size, 1)))
+                        .tint(Palette.accent)
+                    Text(detail(send))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Palette.muted)
+                }
+            }
+            .padding(12)
+            .frame(width: 240, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .sideKeysBackground(cornerRadius: 16)
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private func icon(_ state: FileSend.State) -> String {
+        switch state {
+        case .sending: return "arrow.up.doc"
+        case .sent: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func tint(_ state: FileSend.State) -> Color {
+        switch state {
+        case .sending: return Palette.accent
+        case .sent: return Color(hex: 0x28C840)
+        case .failed: return Color(hex: 0xFEBC2E)
+        }
+    }
+
+    private func title(_ send: FileSend) -> String {
+        switch send.state {
+        case .sending: return send.name
+        case .sent: return "\(send.name) is in the Mac’s Downloads; ⌘V pastes it."
+        case .failed(let why): return why
+        }
+    }
+
+    private func detail(_ send: FileSend) -> String {
+        let done = ByteCountFormatter.string(fromByteCount: send.sent, countStyle: .file)
+        let all = ByteCountFormatter.string(fromByteCount: send.size, countStyle: .file)
+        return "\(done) of \(all)" + (send.waiting > 0 ? " · \(send.waiting) more" : "")
+    }
+}
+
+/// A file picked in Photos, copied where this app can read it until it is sent.
+private struct PickedFile: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .item) { received in
+            guard let copy = StreamClient.ownCopy(of: received.file) else { throw CocoaError(.fileReadUnknown) }
+            return PickedFile(url: copy)
+        }
+    }
+}
+
+/// A cap pressed: a touch smaller and brighter, as a key goes down.
+private struct KeyPress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.93 : 1)
+            .brightness(configuration.isPressed ? 0.12 : 0)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+private extension View {
+    /// The side keys' glass: a dark blur over the picture, a hairline and a soft shadow.
+    /// Liquid Glass from iOS 26 (SwiftUI's own, `glassEffect`), tinted a little dark so the keys
+    /// read over a bright Mac; before it, a dark blur. `interactive`: the glass answers the finger
+    /// (the pill). `morphs`: the pill's and the open keys' glass are one, which morphs between them.
+    func sideKeysBackground(cornerRadius: CGFloat, interactive: Bool = false, morphs: Bool = false) -> some View {
+        modifier(SideKeysGlass(cornerRadius: cornerRadius, interactive: interactive, morphs: morphs))
+    }
+
+    /// The side keys' glass shapes in one container, so they morph into one another (iOS 26).
+    @ViewBuilder
+    func glassGroup() -> some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 4) { self }
+        } else {
+            self
+        }
+    }
+}
+
+private struct SideKeysGlass: ViewModifier {
+    let cornerRadius: CGFloat
+    let interactive: Bool
+    let morphs: Bool
+    @Environment(\.sideKeysGlass) private var namespace
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(iOS 26.0, *) {
+            let glass = Glass.regular.tint(Palette.bar.opacity(0.4))
+            let shaped = content.glassEffect(interactive ? glass.interactive() : glass, in: shape)
+            Group {
+                if morphs, let namespace {
+                    shaped.glassEffectID("sill.keys", in: namespace)
+                } else {
+                    shaped
+                }
+            }
+            .environment(\.colorScheme, .dark)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: shape)
+                .background(shape.fill(Palette.bar.opacity(0.55)))
+                .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+                .environment(\.colorScheme, .dark)
+        }
+    }
+}
+
+private struct SideKeysGlassKey: EnvironmentKey {
+    static let defaultValue: Namespace.ID? = nil
+}
+
+private extension EnvironmentValues {
+    /// SideKeysDock's namespace for the pill's and the open keys' shared glass.
+    var sideKeysGlass: Namespace.ID? {
+        get { self[SideKeysGlassKey.self] }
+        set { self[SideKeysGlassKey.self] = newValue }
+    }
+}
+
+// MARK: - Capturing an area
+
+/// Over the picture while the side keys' capture is on: the finger frames an area, which goes to
+/// the Mac's clipboard as a picture when it lifts (`pick`, fractions of the video frame, the zoom
+/// and the letterbox undone); Cancel, or a frame too small, leaves it.
+private struct RegionPicker: View {
+    let videoSize: CGSize
+    let zoom: PictureZoom
+    let cancel: () -> Void
+    let pick: (CaptureRegion) -> Void
+    @State private var start: CGPoint?
+    @State private var end: CGPoint?
+
+    var body: some View {
+        GeometryReader { geo in
+            let bounds = CGRect(origin: .zero, size: geo.size)
+            let video = zoom.zoomed(HEVCDisplayView.videoRect(in: bounds, videoSize: videoSize), in: bounds)
+            let frame = selection(in: video)
+            ZStack {
+                Color.black.opacity(0.45)
+                    .overlay {
+                        if let frame {
+                            Rectangle()
+                                .frame(width: frame.width, height: frame.height)
+                                .position(x: frame.midX, y: frame.midY)
+                                .blendMode(.destinationOut)
+                        }
+                    }
+                    .compositingGroup()
+                if let frame {
+                    RoundedRectangle(cornerRadius: 2)
+                        .strokeBorder(Color.white, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .frame(width: frame.width, height: frame.height)
+                        .position(x: frame.midX, y: frame.midY)
+                }
+                VStack {
+                    HStack(spacing: 10) {
+                        Image(systemName: "camera.viewfinder")
+                        Text(frame == nil ? "Drag over the area to copy to the Mac" : "Lift to copy")
+                            .font(.system(size: 14, weight: .semibold))
+                        Button("Cancel", action: cancel)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Palette.accent)
+                    }
+                    .foregroundStyle(Palette.text)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(Palette.bar.opacity(0.9)))
+                    .padding(.top, 12)
+                    Spacer()
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if start == nil { start = value.startLocation }
+                        end = value.location
+                    }
+                    .onEnded { _ in
+                        defer { start = nil; end = nil }
+                        guard let frame = selection(in: video), frame.width >= 12, frame.height >= 12,
+                              video.width > 0, video.height > 0 else { return }
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        pick(CaptureRegion(x: (frame.minX - video.minX) / video.width,
+                                           y: (frame.minY - video.minY) / video.height,
+                                           width: frame.width / video.width,
+                                           height: frame.height / video.height))
+                    }
+            )
+        }
+    }
+
+    /// The framed area, inside the picture.
+    private func selection(in video: CGRect) -> CGRect? {
+        guard let start, let end else { return nil }
+        let rect = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
+                          width: abs(end.x - start.x), height: abs(end.y - start.y)).intersection(video)
+        return rect.isNull || rect.isEmpty ? nil : rect
     }
 }
 
@@ -1326,7 +2118,7 @@ private struct TopBar: View {
             // typed on the Mac where its cursor is (`StreamClient.pasteFromDevice`). Where the bar
             // holds it and still a whole thumbnail.
             if menusFit {
-                button(open: false, symbol: "doc.on.clipboard", label: "Paste",
+                button(open: false, symbol: "iphone.and.arrow.forward", label: "Paste",
                        accessibilityLabel: "Paste the clipboard on \(client.macName.isEmpty ? "the Mac" : client.macName)",
                        action: { client.pasteFromDevice() })
                     .opacity(scaleOpen ? 0 : 1)    // under the Aa ruler, as the buttons after Aa

@@ -9,6 +9,7 @@ enum HIDKey {
     static let escape: UInt16 = 0x29
     static let tab: UInt16 = 0x2B
     static let deleteBackward: UInt16 = 0x2A
+    static let returnKey: UInt16 = 0x28
     static let rightArrow: UInt16 = 0x4F
     static let leftArrow: UInt16 = 0x50
     static let downArrow: UInt16 = 0x51
@@ -172,6 +173,9 @@ struct PortraitStreamScreen: View {
     private var streamShape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
     /// The Duo's fold across this screen (StreamScreen, iOS 27.1): where the halves split.
     @Environment(\.duoFold) private var duoFold
+    /// MacBook mode (MacBookMode.swift): the halves as a MacBook, its screen above, its deck below.
+    @AppStorage(MacBookMode.key) private var macBookMode = false
+    @AppStorage(NightMode.key) private var nightOn = false
 
     var body: some View {
         GeometryReader { geo in
@@ -194,9 +198,26 @@ struct PortraitStreamScreen: View {
         return ZStack(alignment: .topLeading) {
             Color.black
 
-            VStack(spacing: split.controls - half) {
-                picturePane(measured: true).padding(8).frame(height: half)
-                controls(width: size.width).frame(height: size.height - split.controls)
+            if macBookMode {
+                VStack(spacing: split.controls - half) {
+                    MacBookScreen { picturePane(measured: true) }
+                        .padding(.horizontal, 6)
+                        .padding(.top, 4)
+                        .frame(height: half)
+                    MacBookDeck(latched: $latched, send: { client.sendFromKeyRow($0) },
+                                leave: { setMacBookMode(false) },
+                                nightOn: nightOn, night: { NightMode.apply(!nightOn, client: client) }) {
+                        trackpad(verticalSpan: nil, plain: true).modifier(MacBookTrackpadSurface())
+                    }
+                    .frame(height: size.height - split.controls)
+                }
+                .transition(.opacity)
+            } else {
+                VStack(spacing: split.controls - half) {
+                    picturePane(measured: true).padding(8).frame(height: half)
+                    controls(width: size.width).frame(height: size.height - split.controls)
+                }
+                .transition(.opacity)
             }
 
             // Same order as landscape: the dim goes over the stream so a tap with the drawer
@@ -294,6 +315,15 @@ struct PortraitStreamScreen: View {
             desktopButton()
                 .opacity(scaleOpen ? 0 : 1)
                 .allowsHitTesting(!scaleOpen)
+
+            // MacBook mode, where the bar holds one more button and still a whole thumbnail.
+            if MacMenuButton.fits(width: width, buttons: 6, buttonWidth: metrics.buttonWidth, gap: 12,
+                                  thumbWidth: metrics.thumbWidth) {
+                barButton(open: false, symbol: "laptopcomputer", label: "MacBook",
+                          accessibilityLabel: "MacBook mode", action: { setMacBookMode(true) })
+                    .opacity(scaleOpen ? 0 : 1)
+                    .allowsHitTesting(!scaleOpen)
+            }
 
             settingsButton()
                 .opacity(scaleOpen ? 0 : 1)
@@ -495,7 +525,7 @@ struct PortraitStreamScreen: View {
             .tourTarget(.keys)
     }
 
-    private func trackpad(verticalSpan: CGFloat?) -> some View {
+    private func trackpad(verticalSpan: CGFloat?, plain: Bool = false) -> some View {
         Trackpad(send: { client.sendInput($0) },
                  setPointer: { client.setOwnPointer($0, from: .trackpad) },
                  feed: { let f = client.pointerFeedState; return (f.anchor, f.reseeds) },
@@ -503,8 +533,16 @@ struct PortraitStreamScreen: View {
                  latched: latched,
                  onModifiersConsumed: { latched = [] },
                  verticalSpan: verticalSpan,
-                 sendGesture: { client.sendGesture($0, fingers: $1) })
+                 sendGesture: { client.sendGesture($0, fingers: $1) },
+                 plain: plain)
             .tourTarget(.trackpad)
+    }
+
+    /// MacBook mode on or off; the iPhone's own keyboard goes down, the deck has the keys.
+    private func setMacBookMode(_ on: Bool) {
+        if on { overlay.setKeyboard(shown: false); setSettings(false, false) }
+        latched = []
+        withAnimation(.easeInOut(duration: 0.3)) { macBookMode = on }
     }
 
     private var drawer: some View { AppDrawer(client: client, drawerOpen: $drawerOpen) }
@@ -549,7 +587,7 @@ struct PortraitStreamScreen: View {
     /// Paste, in the Menus button's old place: this device's clipboard typed on the Mac where its
     /// cursor is (`StreamClient.pasteFromDevice`).
     private func pasteButton(width: CGFloat? = nil) -> some View {
-        barButton(open: false, symbol: "doc.on.clipboard", label: "Paste", width: width,
+        barButton(open: false, symbol: "iphone.and.arrow.forward", label: "Paste", width: width,
                   accessibilityLabel: "Paste the clipboard on \(client.macName.isEmpty ? "the Mac" : client.macName)",
                   action: { client.pasteFromDevice() })
     }

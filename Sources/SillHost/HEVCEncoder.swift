@@ -245,6 +245,12 @@ final class HEVCEncoder {
     /// are one hold of the lock: a repaint that lands meanwhile goes in after the re-encode, never
     /// before it (the older picture would then go into VideoToolbox last and stay on the device
     /// until the next repaint, and `lastFrame` fall back to it).
+    /// The frame the encoder last took: what the devices see now (kind 34's capture), or nil.
+    func latestPicture() -> CVPixelBuffer? {
+        lock.lock(); defer { lock.unlock() }
+        return lastFrame
+    }
+
     func requestKeyframe() {
         lock.lock()
         mailbox.keyframeRequested = true

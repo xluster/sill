@@ -26,16 +26,21 @@ struct Trackpad: View {
     var verticalSpan: CGFloat? = nil
     /// A three- or four-finger gesture, for the Mac (`StreamClient.sendGesture`). True when it went.
     var sendGesture: (TrackpadGestures.Gesture, Int) -> Bool = { _, _ in false }
+    /// MacBook mode's: no well, no dots, no words; the deck draws the glass (MacBookTrackpadSurface).
+    var plain = false
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 22, style: .continuous) }
 
     var body: some View {
         ZStack {
-            Palette.trackpad
-            DotGrid().allowsHitTesting(false)
+            if !plain {
+                Palette.trackpad
+                DotGrid().allowsHitTesting(false)
+            }
             TrackpadView(send: send, setPointer: setPointer, feed: feed, onFingers: onFingers,
                          latched: latched, onModifiersConsumed: onModifiersConsumed,
                          verticalSpan: verticalSpan, sendGesture: sendGesture)
+            if !plain {
             VStack {
                 Spacer(minLength: 0)
                 Text("Drag to move the pointer. Tap to click, two fingers to scroll.")
@@ -45,10 +50,11 @@ struct Trackpad: View {
             }
             .padding(18)
             .allowsHitTesting(false)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(shape)
-        .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        .overlay(shape.strokeBorder(Color.white.opacity(plain ? 0 : 0.08), lineWidth: 1))
     }
 }
 

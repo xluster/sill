@@ -272,6 +272,8 @@ extension StreamClient {
     /// clipboard too. Reading the clipboard from a plain button is iOS's to allow: it asks, until
     /// Settings › Apps › Sill › Paste from Other Apps says Allow. No text: the warning haptic.
     func pasteFromDevice() {
+        // A file copied on this device (a PDF in Files): sent as a file (StreamClient+Files).
+        if connected, pasteFileIfAny() { return }
         // An image and no text: through the Mac's clipboard, then ⌘V (`pasteImage`).
         if connected, !UIPasteboard.general.hasStrings, UIPasteboard.general.hasImages {
             pasteImage()
@@ -281,12 +283,18 @@ extension StreamClient {
             if UIDevice.current.userInterfaceIdiom == .phone { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
             return
         }
+        typeOnMac(raw)
+        #if DEBUG
+        print("clipboard: typed \(raw.count) characters of this device's clipboard on the Mac")
+        #endif
+    }
+
+    /// Text typed on the Mac where its cursor is, as the keyboard types it (Paste, dictation).
+    func typeOnMac(_ raw: String) {
+        guard connected, !raw.isEmpty else { return }
         let text = String(raw.replacingOccurrences(of: "\r\n", with: "\n").prefix(Self.pasteLimit))
         setOwnPointer(nil, from: .none)
         sendInput(.text(text))
-        #if DEBUG
-        print("clipboard: typed \(text.count) characters of this device's clipboard on the Mac")
-        #endif
     }
 
     /// The Paste button's image: sent as kind 32's `image` to a Mac that takes one (`imageGeneration`),
@@ -362,6 +370,12 @@ extension StreamClient {
     /// A receipt's pong (StreamClient.handle): the Mac has read the text. "Sent…", and the copy is dealt
     /// with. One that comes after its time ran out still counts.
     func clipboardReceiptCame(_ payload: Data) {
+        // A file's last part read by the Mac (StreamClient+Files).
+        if let nonce = fileNonce, nonce == payload {
+            fileNonce = nil
+            fileReceipt?.signal()
+            return
+        }
         // The Paste button's image is on the Mac: ⌘V, a moment later, as the Mac writes its clipboard
         // on a queue of its own after reading the message.
         if let nonce = imagePasteNonce, nonce == payload {

@@ -64,13 +64,24 @@ public struct WindowList: Codable {
     /// (Alexis, 2026-10-25). Nil from every host before it, to which a device sends no quit (its
     /// decoder would not know the case).
     public var windowQuit: Int?
+    /// Whether this host takes kind 34, an area of the picture to put on its clipboard (1). Nil from
+    /// every host before it, to which a device sends none.
+    public var captureRegion: Int?
+    /// Whether this host takes files from a device (kind 35, FilePart.swift): 1. Nil from every host
+    /// before it, to which a device sends none.
+    public var files: Int?
+    /// Whether this host takes night mode (kind 36, Night.swift): 1. Nil from every host before it.
+    public var night: Int?
 
     public init(macName: String, windows: [WindowInfo], active: StreamSource, launchID: String? = nil,
                 hostVersion: String? = nil, protocol: Int? = nil, gestures: Int? = nil, clipboard: Int? = nil,
-                windowQuit: Int? = nil) {
+                windowQuit: Int? = nil, captureRegion: Int? = nil, files: Int? = nil, night: Int? = nil) {
         self.macName = macName; self.windows = windows; self.active = active; self.launchID = launchID
         self.hostVersion = hostVersion; self.protocol = `protocol`; self.gestures = gestures
         self.clipboard = clipboard; self.windowQuit = windowQuit
+        self.captureRegion = captureRegion
+        self.files = files
+        self.night = night
     }
 }
 

@@ -176,6 +176,18 @@ final class HostClipboard {
         }
     }
 
+    /// A picture for this Mac's clipboard (kind 34's capture), marked as this launch's like a
+    /// device's image, so it is sent to no device.
+    func put(image png: Data) {
+        board.write(image: png)
+    }
+
+    /// A file for this Mac's clipboard (kind 35's), marked as this launch's, so it is sent to no
+    /// device: ⌘V in the Finder copies it, in a message or a mail attaches it.
+    func put(file url: URL) {
+        board.write(file: url)
+    }
+
     /// The device left: forgotten without a line.
     func clientLeft(_ connection: NWConnection) {
         let id = ObjectIdentifier(connection)
@@ -328,6 +340,20 @@ final class HostClipboard {
                 let png = image.starts(with: [0x89, 0x50, 0x4E, 0x47])
                 item.setData(image, forType: png ? .png : NSPasteboard.PasteboardType("public.jpeg"))
                 if let tiff = NSImage(data: image)?.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+                item.setString(self.launchID, forType: NSPasteboard.PasteboardType(ClipboardPolicy.ownType))
+                self.board.writeObjects([item])
+                let count = self.lastAccess.map(ClipboardPolicy.hostLooks) == false ? prepared : self.board.changeCount
+                self.ownChangeCount = count
+                self.seen = count
+            }
+        }
+
+        /// A file, for this Mac only, marked and counted as `write(_:)` does a text.
+        func write(file url: URL) {
+            queue.async {
+                let prepared = self.board.prepareForNewContents(with: .currentHostOnly)
+                let item = NSPasteboardItem()
+                item.setString(url.absoluteString, forType: .fileURL)
                 item.setString(self.launchID, forType: NSPasteboard.PasteboardType(ClipboardPolicy.ownType))
                 self.board.writeObjects([item])
                 let count = self.lastAccess.map(ClipboardPolicy.hostLooks) == false ? prepared : self.board.changeCount
